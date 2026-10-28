@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Physics Teacher · Firebase</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <style>
+    body { font-family: "Segoe UI", "PingFang TC", "Noto Sans TC", sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800">
+  <div id="root"></div>
+
+  <script>
+    // ========== Firebase（hoyuphysics）==========
+    const firebaseConfig = {
+      apiKey: "AIzaSyAzHIgH35NDtvCRAULOE3_TX9aBa9b_qcs",
+      authDomain: "hoyuphysics.firebaseapp.com",
+      projectId: "hoyuphysics",
+      storageBucket: "hoyuphysics.firebasestorage.app",
+      messagingSenderId: "409265879054",
+      appId: "1:409265879054:web:ebf3bdf94c9025d6b6e45f"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+
+    // 首次使用預設密語（匯入後可在 config/app 修改）
+    const DEFAULT_TEACHER_PIN = "2468";
+    const DEFAULT_ADMIN_PIN = "1357";
+
+    const SESSION_KEY = "physics_teacher_ok";
+
+    function randomPin() {
+      return String(Math.floor(1000 + Math.random() * 9000));
+    }
+
+    async function ensureAppConfig() {
+      const ref = db.collection("config").doc("app");
+      const snap = await ref.get();
+      if (!snap.exists) {
+        await ref.set({
+          teacherPin: DEFAULT_TEACHER_PIN,
+          adminPin: DEFAULT_ADMIN_PIN,
+          subject: "Physics",
+          updatedAt: new Date().toISOString()
+        });
+        return { teacherPin: DEFAULT_TEACHER_PIN, adminPin: DEFAULT_ADMIN_PIN };
+      }
+      return snap.data();
+    }
+
+    // ---------- 將 Sheet / doGet 整包 JSON 寫入 Firestore ----------
+    async function importSheetPayload(payload, onProgress) {
+      const log = (m) => { if (onProgress) onProgress(m); };
+      if (!payload || typeof payload !== "object") throw new Error("JSON 格式不正確");
+
+      // students
+      const students = Array.isArray(payload.students) ? payload.students : [];
+      log(`學生：${students.length} 人…`);
+      let batch = db.batch();
+      let ops = 0;
+      const commitBatch = async () => {
+        if (ops === 0) return;
+        await batch.commit();
+        batch = db.batch();
+        ops = 0;
+      };
+      for (const s of students) {
+        if (!s || !s.id) continue;
+        const id = String(s.id);
+        const ref = db.collection("students").doc(id);
+        batch.set(ref, {
+          id,
+          sid: s.sid || id,
+          class: s.class || "",
+          num: s.num ?? "",
+          name: s.name || "",
+          cohort: s.cohort || "",
+          pin: s.pin || randomPin(),
+          active: s.active !== false,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+        ops++;
+        if (ops >= 400) await commitBatch();
+      }
+      await commitBatch();
+      log(`✓ 學生完成`);
+
+      // maps helpers
+      async function writeMapCollection(colName, obj) {
+        const data = obj && typeof obj === "object" ? obj : {};
+        const keys = Object.keys(data);
+        log(`${colName}：${keys.length} 份…`);
+        for (const k of keys) {
+          const ref = db.collection(colName).doc(String(k));
+          batch.set(ref, { ...data[k], _id: k, updatedAt: new Date().toISOString() }, { merge: true });
+          ops++;
+          if (ops >= 400) await commitBatch();
+        }
+        await commitBatch();
+        log(`✓ ${colName}`);
+      }
+
+      await writeMapCollection("quizMaps", payload.quizMaps);
+      await writeMapCollection("examMaps", payload.examMaps);
+      await writeMapCollection("homeworkMaps", payload.homeworkMaps);
+      await writeMapCollection("pastpaperMaps", payload.pastpaperMaps);
+
+      // syllabus
+      if (payload.syllabus && typeof payload.syllabus === "object") {
+        log("syllabus…");
+        await db.collection("syllabus").doc("all").set({ data: payload.syllabus, updatedAt: new Date().toISOString() }, { merge: true });
+        log("✓ syllabus");
+      }
+
+      // scores tree: payload.scores[sid][quizId] = answers
+      async function writeScoreTree(scoreObj, subCol) {
+        const root = scoreObj && typeof scoreObj === "object" ? scoreObj : {};
+        const sids = Object.keys(root);
+        log(`${subCol}：${sids.length} 名學生…`);
+        for (const sid of sids) {
+          const papers = root[sid] || {};
+          for (const paperId of Object.keys(papers)) {
+            const ref = db.collection("scores").doc(sid).collection(subCol).doc(String(paperId));
+            const val = papers[paperId];
+            const docData = (val && typeof val === "object" && !Array.isArray(val))
+              ? { ...val, updatedAt: new Date().toISOString() }
+              : { value: val, updatedAt: new Date().toISOString() };
+            batch.set(ref, docData, { merge: true });
+            ops++;
+            if (ops >= 400) await commitBatch();
+          }
+        }
+        await commitBatch();
+        log(`✓ ${subCol}`);
+      }
+
+      await writeScoreTree(payload.scores, "quizzes");
+      await writeScoreTree(payload.examScores, "exams");
+      await writeScoreTree(payload.homeworkScores, "homeworks");
+      await writeScoreTree(payload.pastpaperScores, "pastpapers");
+
+      // remediation
+      if (payload.remediationProgress && typeof payload.remediationProgress === "object") {
+        log("remediation…");
+        for (const sid of Object.keys(payload.remediationProgress)) {
+          await db.collection("remediation").doc(sid).set({
+            data: payload.remediationProgress[sid],
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        }
+        log("✓ remediation");
+      }
+
+      await db.collection("meta").doc("migration").set({
+        lastImportAt: new Date().toISOString(),
+        studentCount: students.length,
+        source: "sheet-json"
+      }, { merge: true });
+
+      log("✅ 匯入完成");
+    }
+
+    // ---------- UI ----------
+    function el(tag, attrs, children) {
+      const n = document.createElement(tag);
+      if (attrs) Object.entries(attrs).forEach(([k, v]) => {
+        if (k === "className") n.className = v;
+        else if (k === "onClick") n.onclick = v;
+        else if (k === "onChange") n.onchange = v;
+        else if (k.startsWith("on") && typeof v === "function") n[k.toLowerCase()] = v;
+        else if (k === "html") n.innerHTML = v;
+        else n.setAttribute(k, v);
+      });
+      (children || []).forEach(c => {
+        if (c == null) return;
+        n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+      });
+      return n;
+    }
+
+    async function render() {
+      const root = document.getElementById("root");
+      root.innerHTML = "";
+
+      if (sessionStorage.getItem(SESSION_KEY) !== "1") {
+        const box = el("div", { className: "max-w-md mx-auto mt-24 bg-white rounded-2xl shadow-lg border p-8" }, [
+          el("h1", { className: "text-2xl font-black text-indigo-700 mb-1" }, ["Physics Teacher"]),
+          el("p", { className: "text-sm text-slate-500 mb-6" }, ["Firebase · hoyuphysics（與舊 Sheet 版並存）"]),
+          el("label", { className: "text-xs font-bold text-slate-500" }, ["教師密語"]),
+          el("input", { id: "pin", type: "password", className: "w-full mt-1 mb-4 border rounded-lg px-3 py-2", placeholder: "預設 2468（可改）" }),
+          el("button", {
+            className: "w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-lg",
+            onClick: async () => {
+              const input = document.getElementById("pin").value.trim();
+              try {
+                const cfg = await ensureAppConfig();
+                if (input === (cfg.teacherPin || DEFAULT_TEACHER_PIN)) {
+                  sessionStorage.setItem(SESSION_KEY, "1");
+                  render();
+                } else alert("密語不正確");
+              } catch (e) {
+                alert("連線失敗：" + e.message);
+              }
+            }
+          }, ["進入"]),
+          el("p", { className: "text-[11px] text-slate-400 mt-4 leading-relaxed" }, [
+            "首次進入會自動建立 config/app。預設教師密語 2468、Admin 密語 1357，可於下方「系統設定」修改。"
+          ])
+        ]);
+        root.appendChild(box);
+        return;
+      }
+
+      // ---- main shell ----
+      const header = el("header", { className: "bg-slate-900 text-white px-6 py-4 flex flex-wrap items-center justify-between gap-3" }, [
+        el("div", {}, [
+          el("div", { className: "font-black text-lg" }, ["Physics Teacher · Firebase"]),
+          el("div", { className: "text-xs text-slate-400" }, ["project: hoyuphysics · 舊 PhysicsQuiz.html 仍可用 Sheet"])
+        ]),
+        el("button", {
+          className: "text-sm bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg",
+          onClick: () => { sessionStorage.removeItem(SESSION_KEY); render(); }
+        }, ["登出"])
+      ]);
+
+      const main = el("main", { className: "max-w-5xl mx-auto p-6 space-y-6" });
+
+      // stats
+      const statsCard = el("div", { className: "bg-white rounded-2xl border shadow-sm p-5" }, [
+        el("h2", { className: "font-bold text-slate-800 mb-3" }, ["雲端概況"]),
+        el("div", { id: "stats", className: "text-sm text-slate-600" }, ["載入中…"])
+      ]);
+      main.appendChild(statsCard);
+
+      // import
+      const importCard = el("div", { className: "bg-white rounded-2xl border shadow-sm p-5 space-y-3" }, [
+        el("h2", { className: "font-bold text-slate-800" }, ["① 從 Google Sheet 匯入資料"]),
+        el("p", { className: "text-sm text-slate-500 leading-relaxed" }, [
+          "在舊版 PhysicsQuiz 的 Apps Script 網址用瀏覽器開啟（doGet），會得到一整段 JSON。全選複製後貼在下方，或使用已匯出的完整 JSON。匯入會寫入 Firestore（學生若無 pin 會自動產生 4 位）。"
+        ]),
+        el("textarea", {
+          id: "importJson",
+          className: "w-full h-40 border rounded-xl p-3 text-xs mono",
+          placeholder: '{ "students": [...], "scores": {...}, ... }'
+        }),
+        el("div", { className: "flex flex-wrap gap-2" }, [
+          el("button", {
+            id: "btnImport",
+            className: "bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-lg text-sm",
+            onClick: async () => {
+              const raw = document.getElementById("importJson").value.trim();
+              const logEl = document.getElementById("importLog");
+              logEl.textContent = "";
+              if (!raw) return alert("請先貼上 JSON");
+              let payload;
+              try { payload = JSON.parse(raw); }
+              catch (e) { return alert("JSON 解析失敗：" + e.message); }
+              const btn = document.getElementById("btnImport");
+              btn.disabled = true;
+              btn.textContent = "匯入中…";
+              try {
+                await importSheetPayload(payload, (m) => {
+                  logEl.textContent += m + "\n";
+                  logEl.scrollTop = logEl.scrollHeight;
+                });
+                await refreshStats();
+                await refreshStudents();
+              } catch (e) {
+                logEl.textContent += "錯誤：" + e.message + "\n";
+                alert(e.message);
+              } finally {
+                btn.disabled = false;
+                btn.textContent = "開始匯入 Firestore";
+              }
+            }
+          }, ["開始匯入 Firestore"])
+        ]),
+        el("pre", { id: "importLog", className: "bg-slate-900 text-emerald-400 text-xs p-3 rounded-xl h-32 overflow-auto mono" }, ["// 進度會顯示在這裡"])
+      ]);
+      main.appendChild(importCard);
+
+      // students preview
+      const stuCard = el("div", { className: "bg-white rounded-2xl border shadow-sm p-5" }, [
+        el("div", { className: "flex justify-between items-center mb-3" }, [
+          el("h2", { className: "font-bold text-slate-800" }, ["② 學生與 PIN"]),
+          el("button", {
+            className: "text-sm text-indigo-600 font-bold",
+            onClick: () => refreshStudents()
+          }, ["重新整理"])
+        ]),
+        el("p", { className: "text-xs text-slate-500 mb-2" }, ["學生版登入用：學生 ID（如 S4A-3）+ 4 位 PIN。可複製下表派發。"]),
+        el("div", { className: "overflow-auto max-h-80 border rounded-xl" }, [
+          el("table", { className: "min-w-full text-sm" }, [
+            el("thead", { className: "bg-slate-50 sticky top-0" }, [
+              el("tr", {}, ["ID", "班別", "學號", "姓名", "群組", "PIN"].map(h =>
+                el("th", { className: "text-left px-3 py-2 text-xs font-bold text-slate-500" }, [h])
+              ))
+            ]),
+            el("tbody", { id: "stuBody" }, [])
+          ])
+        ])
+      ]);
+      main.appendChild(stuCard);
+
+      // settings
+      const setCard = el("div", { className: "bg-white rounded-2xl border shadow-sm p-5 space-y-3" }, [
+        el("h2", { className: "font-bold text-slate-800" }, ["③ 系統設定（密語）"]),
+        el("div", { className: "grid sm:grid-cols-2 gap-3" }, [
+          el("div", {}, [
+            el("label", { className: "text-xs font-bold text-slate-500" }, ["教師密語"]),
+            el("input", { id: "teacherPinInput", className: "w-full border rounded-lg px-3 py-2 mt-1", type: "text" })
+          ]),
+          el("div", {}, [
+            el("label", { className: "text-xs font-bold text-slate-500" }, ["學生版 Admin 密語"]),
+            el("input", { id: "adminPinInput", className: "w-full border rounded-lg px-3 py-2 mt-1", type: "text" })
+          ])
+        ]),
+        el("button", {
+          className: "bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-lg text-sm",
+          onClick: async () => {
+            const teacherPin = document.getElementById("teacherPinInput").value.trim();
+            const adminPin = document.getElementById("adminPinInput").value.trim();
+            if (!teacherPin || !adminPin) return alert("請填寫兩個密語");
+            await db.collection("config").doc("app").set({
+              teacherPin, adminPin, subject: "Physics", updatedAt: new Date().toISOString()
+            }, { merge: true });
+            alert("已儲存");
+          }
+        }, ["儲存密語"])
+      ]);
+      main.appendChild(setCard);
+
+      // next steps
+      main.appendChild(el("div", { className: "bg-amber-50 border border-amber-200 rounded-2xl p-5 text-sm text-amber-900 leading-relaxed" }, [
+        el("div", { className: "font-bold mb-1" }, ["下一階段（開發中）"]),
+        el("ul", { className: "list-disc pl-5 space-y-1" }, [
+          el("li", {}, ["教師版：入分、功課／小測藍圖編輯（由舊版功能遷移）"]),
+          el("li", {}, ["學生版：個人進度、排行、AI 補底特訓（讀 Firestore）"]),
+          el("li", {}, ["確認無誤後，再做一次「最後全量匯入」並停用 Sheet 寫入"])
+        ])
+      ]));
+
+      root.appendChild(header);
+      root.appendChild(main);
+
+      async function refreshStats() {
+        const elStats = document.getElementById("stats");
+        try {
+          const stu = await db.collection("students").get();
+          const hw = await db.collection("homeworkMaps").get();
+          const qz = await db.collection("quizMaps").get();
+          const mig = await db.collection("meta").doc("migration").get();
+          const migData = mig.exists ? mig.data() : {};
+          elStats.innerHTML = `
+            學生文件：<b>${stu.size}</b>　
+            功課藍圖：<b>${hw.size}</b>　
+            小測藍圖：<b>${qz.size}</b><br/>
+            <span class="text-xs text-slate-400">上次匯入：${migData.lastImportAt || "尚未匯入"}</span>
+          `;
+        } catch (e) {
+          elStats.textContent = "讀取失敗：" + e.message + "（請確認 Firestore 規則允許讀寫）";
+        }
+      }
+
+      async function refreshStudents() {
+        const body = document.getElementById("stuBody");
+        body.innerHTML = "";
+        try {
+          const snap = await db.collection("students").orderBy("id").get().catch(() => db.collection("students").get());
+          const rows = [];
+          snap.forEach(doc => rows.push(doc.data()));
+          rows.sort((a, b) => String(a.id).localeCompare(String(b.id), "en", { numeric: true }));
+          rows.forEach(s => {
+            const tr = el("tr", { className: "border-t" }, [
+              el("td", { className: "px-3 py-1.5 mono text-xs" }, [s.id || ""]),
+              el("td", { className: "px-3 py-1.5" }, [String(s.class || "")]),
+              el("td", { className: "px-3 py-1.5" }, [String(s.num ?? "")]),
+              el("td", { className: "px-3 py-1.5 font-semibold" }, [s.name || ""]),
+              el("td", { className: "px-3 py-1.5 text-xs text-slate-500" }, [s.cohort || ""]),
+              el("td", { className: "px-3 py-1.5 mono font-bold text-indigo-700" }, [s.pin || "—"])
+            ]);
+            body.appendChild(tr);
+          });
+          if (!rows.length) {
+            body.appendChild(el("tr", {}, [
+              el("td", { className: "px-3 py-4 text-slate-400", colspan: "6" }, ["尚無學生，請先匯入 Sheet JSON"])
+            ]));
+          }
+        } catch (e) {
+          body.appendChild(el("tr", {}, [
+            el("td", { className: "px-3 py-4 text-red-500", colspan: "6" }, [e.message])
+          ]));
+        }
+      }
+
+      // load config into inputs
+      try {
+        const cfg = await ensureAppConfig();
+        document.getElementById("teacherPinInput").value = cfg.teacherPin || DEFAULT_TEACHER_PIN;
+        document.getElementById("adminPinInput").value = cfg.adminPin || DEFAULT_ADMIN_PIN;
+      } catch (e) { console.warn(e); }
+
+      await refreshStats();
+      await refreshStudents();
+    }
+
+    render();
+  </script>
+</body>
+</html>
