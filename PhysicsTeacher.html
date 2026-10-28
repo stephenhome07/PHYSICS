@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Physics Student · Firebase</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <style>
+    body { font-family: "Segoe UI", "PingFang TC", "Noto Sans TC", sans-serif; }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800">
+  <div id="root"></div>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyAzHIgH35NDtvCRAULOE3_TX9aBa9b_qcs",
+      authDomain: "hoyuphysics.firebaseapp.com",
+      projectId: "hoyuphysics",
+      storageBucket: "hoyuphysics.firebasestorage.app",
+      messagingSenderId: "409265879054",
+      appId: "1:409265879054:web:ebf3bdf94c9025d6b6e45f"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+
+    const SS_STUDENT = "physics_student_id";
+    const SS_ADMIN = "physics_student_admin";
+
+    function el(tag, attrs, children) {
+      const n = document.createElement(tag);
+      if (attrs) Object.entries(attrs).forEach(([k, v]) => {
+        if (k === "className") n.className = v;
+        else if (k === "onClick") n.onclick = v;
+        else if (k === "html") n.innerHTML = v;
+        else if (k === "value") n.value = v;
+        else n.setAttribute(k, v);
+      });
+      (children || []).forEach(c => {
+        if (c == null) return;
+        n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+      });
+      return n;
+    }
+
+    async function getAdminPin() {
+      const snap = await db.collection("config").doc("app").get();
+      if (snap.exists && snap.data().adminPin) return String(snap.data().adminPin);
+      return "1357";
+    }
+
+    async function loadStudent(id) {
+      const snap = await db.collection("students").doc(id).get();
+      if (!snap.exists) return null;
+      return snap.data();
+    }
+
+    async function loadSubScores(studentId, sub) {
+      const snap = await db.collection("scores").doc(studentId).collection(sub).get();
+      const out = {};
+      snap.forEach(d => { out[d.id] = d.data(); });
+      return out;
+    }
+
+    async function loadMapTitles(col) {
+      const snap = await db.collection(col).get();
+      const out = {};
+      snap.forEach(d => {
+        const data = d.data() || {};
+        out[d.id] = data.title || d.id;
+      });
+      return out;
+    }
+
+    function summarizePaper(data) {
+      // homework: { scores: { qid: val }, ... }; quiz: { qid: val }
+      const scores = (data && data.scores && typeof data.scores === "object") ? data.scores : data;
+      if (!scores || typeof scores !== "object") return { answered: 0, preview: "—" };
+      const keys = Object.keys(scores).filter(k => !["updatedAt", "remakeStatus", "remarks", "gradingDate", "remakeDate", "_id"].includes(k));
+      let answered = 0;
+      keys.forEach(k => {
+        const v = scores[k];
+        if (v !== undefined && v !== null && String(v).trim() !== "") answered++;
+      });
+      return { answered, preview: answered ? `${answered} 題有紀錄` : "—" };
+    }
+
+    function renderLogin() {
+      const root = document.getElementById("root");
+      root.innerHTML = "";
+      const card = el("div", { className: "max-w-md mx-auto mt-16 bg-white rounded-2xl shadow-lg border p-8" }, [
+        el("div", { className: "text-center mb-6" }, [
+          el("div", { className: "text-3xl mb-2" }, ["⚛️"]),
+          el("h1", { className: "text-2xl font-black text-indigo-700" }, ["Physics Student"]),
+          el("p", { className: "text-sm text-slate-500 mt-1" }, ["輸入學生 ID 與 4 位 PIN"])
+        ]),
+        el("label", { className: "text-xs font-bold text-slate-500" }, ["學生 ID（例如 S4A-3）"]),
+        el("input", { id: "sid", className: "w-full mt-1 mb-3 border rounded-lg px-3 py-2", placeholder: "S4A-3", autocomplete: "username" }),
+        el("label", { className: "text-xs font-bold text-slate-500" }, ["PIN（4 位）"]),
+        el("input", { id: "pin", type: "password", maxlength: "4", inputmode: "numeric", className: "w-full mt-1 mb-4 border rounded-lg px-3 py-2 tracking-widest text-lg", placeholder: "••••" }),
+        el("button", {
+          className: "w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-lg",
+          onClick: async () => {
+            const sid = document.getElementById("sid").value.trim();
+            const pin = document.getElementById("pin").value.trim();
+            if (!sid || pin.length !== 4) return alert("請輸入學生 ID 與 4 位 PIN");
+            try {
+              const stu = await loadStudent(sid);
+              if (!stu) return alert("找不到此學生，請確認 ID（區分大小寫）");
+              if (String(stu.pin || "") !== pin) return alert("PIN 不正確");
+              sessionStorage.setItem(SS_STUDENT, sid);
+              sessionStorage.removeItem(SS_ADMIN);
+              renderApp();
+            } catch (e) {
+              alert("連線失敗：" + e.message);
+            }
+          }
+        }, ["登入"]),
+        el("button", {
+          className: "w-full mt-3 text-xs text-slate-400 hover:text-indigo-600",
+          onClick: async () => {
+            const code = prompt("Admin 密語（可檢視任意學生）");
+            if (code == null) return;
+            try {
+              const adminPin = await getAdminPin();
+              if (String(code) !== String(adminPin)) return alert("密語錯誤");
+              sessionStorage.setItem(SS_ADMIN, "1");
+              // 載入學生清單供選擇
+              const snap = await db.collection("students").get();
+              const list = [];
+              snap.forEach(d => list.push(d.id));
+              list.sort();
+              if (!list.length) return alert("雲端尚無學生，請先在教師版匯入資料");
+              const pick = prompt("輸入要檢視的學生 ID：\n\n" + list.slice(0, 30).join(", ") + (list.length > 30 ? "…" : ""));
+              if (!pick) return;
+              const stu = await loadStudent(pick.trim());
+              if (!stu) return alert("找不到學生");
+              sessionStorage.setItem(SS_STUDENT, pick.trim());
+              renderApp();
+            } catch (e) {
+              alert(e.message);
+            }
+          }
+        }, ["Admin 模式（教師）"])
+      ]);
+      root.appendChild(card);
+    }
+
+    async function renderApp() {
+      const sid = sessionStorage.getItem(SS_STUDENT);
+      if (!sid) return renderLogin();
+      const isAdmin = sessionStorage.getItem(SS_ADMIN) === "1";
+      const root = document.getElementById("root");
+      root.innerHTML = "";
+      root.appendChild(el("div", { className: "text-center py-20 text-slate-400" }, ["載入中…"]));
+
+      try {
+        const student = await loadStudent(sid);
+        if (!student) {
+          sessionStorage.removeItem(SS_STUDENT);
+          return renderLogin();
+        }
+
+        const [quizzes, exams, homeworks, pastpapers, quizTitles, examTitles, hwTitles, ppTitles] = await Promise.all([
+          loadSubScores(sid, "quizzes"),
+          loadSubScores(sid, "exams"),
+          loadSubScores(sid, "homeworks"),
+          loadSubScores(sid, "pastpapers"),
+          loadMapTitles("quizMaps"),
+          loadMapTitles("examMaps"),
+          loadMapTitles("homeworkMaps"),
+          loadMapTitles("pastpaperMaps")
+        ]);
+
+        root.innerHTML = "";
+
+        const header = el("header", { className: "bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-5" }, [
+          el("div", { className: "max-w-3xl mx-auto flex flex-wrap items-center justify-between gap-3" }, [
+            el("div", {}, [
+              el("div", { className: "text-xs text-indigo-100" }, [isAdmin ? "Admin 檢視中" : "學生專區 · Firebase"]),
+              el("div", { className: "text-xl font-black" }, [`${student.name || ""}（${student.id}）`]),
+              el("div", { className: "text-sm text-indigo-100" }, [`${student.class || ""} No.${student.num ?? ""} · ${student.cohort || ""}`])
+            ]),
+            el("div", { className: "flex gap-2" }, [
+              isAdmin ? el("button", {
+                className: "text-xs bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-lg",
+                onClick: async () => {
+                  const snap = await db.collection("students").get();
+                  const list = [];
+                  snap.forEach(d => list.push(d.id));
+                  list.sort();
+                  const pick = prompt("切換學生 ID：", sid);
+                  if (!pick) return;
+                  const s = await loadStudent(pick.trim());
+                  if (!s) return alert("找不到");
+                  sessionStorage.setItem(SS_STUDENT, pick.trim());
+                  renderApp();
+                }
+              }, ["切換學生"]) : null,
+              el("button", {
+                className: "text-xs bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-lg",
+                onClick: () => {
+                  sessionStorage.removeItem(SS_STUDENT);
+                  sessionStorage.removeItem(SS_ADMIN);
+                  renderLogin();
+                }
+              }, ["登出"])
+            ].filter(Boolean))
+          ])
+        ]);
+
+        const main = el("main", { className: "max-w-3xl mx-auto p-4 space-y-4" });
+
+        function section(title, scoresObj, titles) {
+          const ids = Object.keys(scoresObj || {}).sort();
+          const box = el("div", { className: "bg-white rounded-2xl border shadow-sm p-4" }, [
+            el("h2", { className: "font-bold text-slate-800 mb-3" }, [title])
+          ]);
+          if (!ids.length) {
+            box.appendChild(el("p", { className: "text-sm text-slate-400" }, ["暫無紀錄（若剛匯入請重新整理）"]));
+            return box;
+          }
+          const ul = el("div", { className: "space-y-2" });
+          ids.forEach(id => {
+            const sum = summarizePaper(scoresObj[id]);
+            ul.appendChild(el("div", { className: "flex justify-between items-center text-sm border rounded-xl px-3 py-2 bg-slate-50" }, [
+              el("div", {}, [
+                el("div", { className: "font-semibold text-slate-800" }, [titles[id] || id]),
+                el("div", { className: "text-[11px] text-slate-400 font-mono" }, [id])
+              ]),
+              el("div", { className: "text-indigo-600 font-bold text-xs" }, [sum.preview])
+            ]));
+          });
+          box.appendChild(ul);
+          return box;
+        }
+
+        main.appendChild(section("📖 功課", homeworks, hwTitles));
+        main.appendChild(section("📝 小測", quizzes, quizTitles));
+        main.appendChild(section("🏫 大考", exams, examTitles));
+        main.appendChild(section("📚 歷屆試題", pastpapers, ppTitles));
+
+        main.appendChild(el("div", { className: "bg-slate-100 rounded-2xl p-4 text-xs text-slate-500 leading-relaxed" }, [
+          "此為 Firebase 學生版第一期：可登入並查看已匯入的成績摘要。",
+          "排行榜、AI 補底特訓、Pastpaper 自助輸入等會逐步由舊版遷移過來。",
+          "舊連結（Sheet 版）在過渡期仍然有效。"
+        ]));
+
+        root.appendChild(header);
+        root.appendChild(main);
+      } catch (e) {
+        root.innerHTML = "";
+        root.appendChild(el("div", { className: "max-w-md mx-auto mt-20 bg-white border rounded-2xl p-6 text-center" }, [
+          el("p", { className: "text-red-600 font-bold mb-2" }, ["載入失敗"]),
+          el("p", { className: "text-sm text-slate-500 mb-4" }, [e.message]),
+          el("button", { className: "text-indigo-600 font-bold", onClick: () => { sessionStorage.clear(); renderLogin(); } }, ["返回登入"])
+        ]));
+      }
+    }
+
+    if (sessionStorage.getItem(SS_STUDENT)) renderApp();
+    else renderLogin();
+  </script>
+</body>
+</html>
