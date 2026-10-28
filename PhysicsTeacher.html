@@ -140,7 +140,7 @@ function Sidebar({ view, setView }) {
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">日常功課</div>
         <Item id="hwGrade" label="批改與狀態追蹤" />
-        <Item id="hwSettings" label="內容與藍圖設定" />
+        <Item id="hwSettings" label="功課設定" />
         <Item id="hwSummary" label="成績總表與快速編輯" />
         <Item id="hwChase" label="追欠交及改正區" />
       </div>
@@ -178,7 +178,7 @@ function ImportView({ onReload }) {
       const id = String(s.id);
       batch.set(db.collection("students").doc(id), {
         id, sid: s.sid||id, class: s.class||"", num: s.num??"", name: s.name||"",
-        cohort: s.cohort||"", pin: s.pin||randomPin(), active: s.active!==false,
+        cohort: s.cohort||"", pin: (s.pin!=null && s.pin!=="") ? s.pin : "", active: s.active!==false,
         updatedAt: new Date().toISOString()
       }, { merge: true });
       ops++; if (ops>=400) await commit();
@@ -265,12 +265,11 @@ function ImportView({ onReload }) {
 function IdMapView({ students, onReload }) {
   const [text, setText] = useState("");
   const [log, setLog] = useState("");
-  const [deleteOld, setDeleteOld] = useState(true);
 
   const run = async () => {
     setLog("");
     const lines = text.trim().split("\n").map(l=>l.trim()).filter(Boolean);
-    let ok=0, fail=0;
+    let ok=0, skip=0, fail=0;
     for (const line of lines) {
       let cls, num, newId;
       if (line.includes("\t")) {
@@ -282,37 +281,30 @@ function IdMapView({ students, onReload }) {
           const m = p[0].match(/^([A-Za-z0-9]+)-(\d+)$/);
           if (m) { cls=m[1]; num=m[2]; newId=p[1]; }
         } else if (p.length>=3) { cls=p[0]; num=p[1]; newId=p[2]; }
+      } else {
+        const p = line.split(/\s+/).filter(Boolean);
+        if (p.length>=3) { cls=p[0]; num=p[1]; newId=p[2]; }
       }
       if (!cls || num===undefined || !newId) {
-        setLog(l=>l+`略過無法解析：${line}\n`); fail++; continue;
+        setLog(l=>l+`略過無法解析：${line}\n`); skip++; continue;
       }
       newId = String(newId).trim();
-      if (!/^s\d+/i.test(newId)) {
-        setLog(l=>l+`警告：${newId} 不像 s12345678 格式，仍繼續\n`);
-      }
       const match = students.find(s => String(s.class)===String(cls) && String(s.num)===String(num));
       if (!match) {
-        // create fresh
-        try {
-          await db.collection("students").doc(newId).set({
-            id: newId, sid: newId, class: cls, num: isNaN(Number(num))?num:Number(num),
-            name: "", cohort: "", pin: randomPin(), active: true, updatedAt: new Date().toISOString()
-          }, { merge: true });
-          setLog(l=>l+`新建 ${cls}-${num} → ${newId}\n`);
-          ok++;
-        } catch(e) { setLog(l=>l+`失敗 ${line}: ${e.message}\n`); fail++; }
+        setLog(l=>l+`略過（系統無此學生）：${cls}-${num}\n`);
+        skip++;
         continue;
       }
       if (match.id === newId) {
-        setLog(l=>l+`已是 ${newId}（${cls}-${num}）\n`); ok++; continue;
+        setLog(l=>l+`已是 ${newId}（${cls}-${num} ${match.name||""}）\n`); ok++; continue;
       }
       try {
         await migrateStudentId(match.id, newId, { class: cls, num: isNaN(Number(num))?num:Number(num) });
-        setLog(l=>l+`遷移 ${match.id} → ${newId}（${cls}-${num}）\n`);
+        setLog(l=>l+`✓ 遷移 ${match.id} → ${newId}（${cls}-${num} ${match.name||""}）\n`);
         ok++;
       } catch(e) { setLog(l=>l+`失敗 ${line}: ${e.message}\n`); fail++; }
     }
-    setLog(l=>l+`\n完成：成功 ${ok}，失敗/略過 ${fail}\n`);
+    setLog(l=>l+`\n完成：更新 ${ok}，略過 ${skip}，失敗 ${fail}\n（只更新現有學生，不會新增）\n`);
     if (onReload) onReload();
   };
 
@@ -321,12 +313,13 @@ function IdMapView({ students, onReload }) {
       <div className="bg-white rounded-2xl border p-5 space-y-3">
         <h2 className="font-bold text-lg">學生 ID 對照補齊</h2>
         <p className="text-sm text-slate-600 leading-relaxed">
-          目標主鍵格式：<b className="mono">s12345678</b>（學生編號）。班別／學號只作顯示。<br/>
-          每行一種：<code className="bg-slate-100 px-1">S4A	3	s12345678</code> 或 <code className="bg-slate-100 px-1">S4A-3,s12345678</code>
+          只會<strong>更新系統裡已有的學生</strong>（以班別+學號對上），全校名單貼上沒問題，找不到的會略過、不會新增。<br/>
+          目標主鍵：<b className="mono">s12345678</b>。每行：
+          <code className="bg-slate-100 px-1">S4A	3	s12345678</code> 或 <code className="bg-slate-100 px-1">S4A-3,s12345678</code>
         </p>
         <textarea className="w-full h-48 border rounded-xl p-3 text-sm mono" value={text} onChange={e=>setText(e.target.value)}
           placeholder={"S4A\t3\ts12345678\nS4A-5,s12345679"} />
-        <button className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-lg text-sm" onClick={run}>執行對照遷移</button>
+        <button className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-lg text-sm" onClick={run}>執行對照（只更新現有）</button>
         <pre className="bg-slate-900 text-emerald-400 text-xs p-3 rounded-xl h-40 overflow-auto mono">{log||"// 結果"}</pre>
       </div>
       <div className="bg-white rounded-2xl border p-5">
@@ -351,13 +344,25 @@ function IdMapView({ students, onReload }) {
   );
 }
 
-function PinsView({ students }) {
+function PinsView({ students, onReload }) {
+  const [busy, setBusy] = useState("");
+  const resetPin = async (sid) => {
+    if (!confirm("重設「"+sid+"」的 PIN？學生下次登入需重新自設。")) return;
+    setBusy(sid);
+    try {
+      await db.collection("students").doc(sid).set({ pin: "", updatedAt: new Date().toISOString() }, { merge: true });
+      if (onReload) await onReload();
+      alert("已重設，學生下次登入會被要求設定新 PIN");
+    } catch(e) { alert(e.message); }
+    setBusy("");
+  };
   return (
     <div className="bg-white rounded-2xl border p-5 max-w-4xl">
-      <h2 className="font-bold mb-3">學生與 PIN</h2>
+      <h2 className="font-bold mb-1">學生與 PIN</h2>
+      <p className="text-xs text-slate-500 mb-3">空白 = 尚未設定（學生首次登入自設）。可在此查看或重設。</p>
       <div className="overflow-auto max-h-[70vh]">
         <table className="min-w-full text-sm">
-          <thead className="sticky top-0 bg-slate-50"><tr>{["ID","班","號","姓名","群組","PIN"].map(h=><th key={h} className="text-left px-2 py-2 text-xs text-slate-500">{h}</th>)}</tr></thead>
+          <thead className="sticky top-0 bg-slate-50"><tr>{["ID","班","號","姓名","群組","PIN","操作"].map(h=><th key={h} className="text-left px-2 py-2 text-xs text-slate-500">{h}</th>)}</tr></thead>
           <tbody>
             {students.map(s=>(
               <tr key={s.id} className="border-t">
@@ -366,7 +371,12 @@ function PinsView({ students }) {
                 <td className="px-2 py-1">{s.num}</td>
                 <td className="px-2 py-1 font-semibold">{s.name}</td>
                 <td className="px-2 py-1 text-xs text-slate-500">{s.cohort}</td>
-                <td className="px-2 py-1 mono font-bold text-indigo-700">{s.pin}</td>
+                <td className="px-2 py-1 mono font-bold text-indigo-700">{s.pin ? s.pin : <span className="text-slate-400 font-normal">未設定</span>}</td>
+                <td className="px-2 py-1">
+                  <button disabled={busy===s.id} className="text-[11px] font-bold text-rose-600 hover:underline" onClick={()=>resetPin(s.id)}>
+                    {busy===s.id?"…":"重設 PIN"}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -376,7 +386,6 @@ function PinsView({ students }) {
   );
 }
 
-// ---------- Homework Settings ----------
 function HwSettingsView({ students, homeworkMaps, setHomeworkMaps, currentCohort }) {
   const cohorts = useMemo(() => Array.from(new Set(students.map(s=>s.cohort).filter(Boolean))).sort(), [students]);
   const [selectedCohort, setSelectedCohort] = useState(currentCohort || cohorts[0] || "");
@@ -462,6 +471,32 @@ function HwSettingsView({ students, homeworkMaps, setHomeworkMaps, currentCohort
     setBusy(false);
   };
 
+  
+  const buildCsvPrompt = () => `【身份】你是一位專門為香港高中物理（HKDSE）出題與分析的老師，學生程度為 Band 3。
+
+【任務】我會上傳一份物理功課（可能是 MC、LQ，或兩者混合的 PDF / Word / 圖片）。請你分析這份功課，為「每一小題」產生一筆記錄，輸出成「Tab 分隔」的純文字格式，方便我直接貼到學校系統。
+
+【提取規則】
+
+一、題目 ID（必須嚴格遵守）
+- MC 題：MC1、MC2…
+- LQ 題：LQ1a、LQ1bi、LQ2a…
+
+二、題型：MC 或 LQ（全大寫）
+三、滿分：MC 預設 1；LQ 按複雜度 2–4
+四、深淺度：淺 / 中 / 深（中文）
+五、topicId：課程大綱編號（如 2.3.3）；topicDesc：20–30 字中文描述（自擬，勿抄大綱長句）
+六、正確答案：MC 填 A/B/C/D；LQ 留空
+
+【輸出格式】每行一題，Tab 分隔，共 7 欄：
+題目ID	題型	滿分	深淺度	topicId	topicDesc	正確答案
+
+【絕對禁止】不要表格、Markdown 或說明，只輸出題目行。`;
+
+  const copyPrompt = () => {
+    navigator.clipboard.writeText(buildCsvPrompt()).then(()=>alert("已複製 AI Prompt！貼到 Gemini / ChatGPT，上傳功課後即可生成可貼上的表格。")).catch(()=>alert("複製失敗，請手動全選 Prompt"));
+  };
+
   const loadEdit = (id) => {
     const hw = homeworkMaps[id]; if (!hw) return;
     setHwId(id); setHwTitle(hw.title||"");
@@ -474,7 +509,7 @@ function HwSettingsView({ students, homeworkMaps, setHomeworkMaps, currentCohort
     <div className="grid lg:grid-cols-2 gap-4">
       <div className="bg-white rounded-2xl border p-4 space-y-2">
         <div className="flex justify-between items-center">
-          <h2 className="font-bold">功課藍圖</h2>
+          <h2 className="font-bold">功課設定</h2>
           <select className="border rounded px-2 py-1 text-sm" value={selectedCohort} onChange={e=>setSelectedCohort(e.target.value)}>
             {cohorts.map(c=><option key={c} value={c}>{c}</option>)}
           </select>
@@ -504,6 +539,7 @@ function HwSettingsView({ students, homeworkMaps, setHomeworkMaps, currentCohort
           {cohorts.map(c=><option key={c} value={c}>{c}</option>)}
         </select>
         <textarea className="w-full h-56 border rounded-xl p-3 text-xs mono" placeholder="題目ID	題型	滿分	深淺	topicId	描述	答案" value={pasteData} onChange={e=>setPasteData(e.target.value)} />
+        <button type="button" className="w-full text-sm font-bold bg-violet-50 text-violet-700 border border-violet-200 rounded-lg py-2 hover:bg-violet-100" onClick={copyPrompt}>複製 AI Prompt（生成 Tab 表格）</button>
         <div className="flex gap-2">
           <button disabled={busy} className="bg-amber-500 text-white font-bold px-4 py-2 rounded-lg text-sm" onClick={handleSave}>{busy?"…":"儲存"}</button>
           <button className="bg-slate-100 font-bold px-4 py-2 rounded-lg text-sm" onClick={()=>{setHwId("");setHwTitle("");setPasteData("");setEditingOriginalId(null);}}>取消</button>
@@ -525,6 +561,7 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
   const editRef = useRef(null);
   const sidRef = useRef("");
   const hwRef = useRef("");
+  const inputRefs = useRef({});
   useEffect(()=>{ editRef.current=edit; },[edit]);
   useEffect(()=>{ sidRef.current=selectedStudentId; },[selectedStudentId]);
   useEffect(()=>{ hwRef.current=selectedHw; },[selectedHw]);
@@ -533,13 +570,36 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
   },[availableHws]);
 
   const map = homeworkMaps[selectedHw];
+  const qList = (map && map.questions) ? map.questions : [];
+
+  const focusNextEmpty = (fromQid, scores) => {
+    const idx = qList.findIndex(q => q.id === fromQid);
+    for (let i = idx + 1; i < qList.length; i++) {
+      const id = qList[i].id;
+      const v = scores?.[id];
+      if (v === undefined || v === null || String(v).trim() === "") {
+        const el = inputRefs.current[id];
+        if (el) { setTimeout(() => { el.focus(); el.select && el.select(); }, 30); }
+        return;
+      }
+    }
+  };
 
   const openStudent = (sid) => {
     if (timer.current) { clearTimeout(timer.current); timer.current=null; }
     setSelectedStudentId(sid);
     const rec = homeworkScores[sid]?.[selectedHw];
-    setEdit(rec ? { ...rec, scores: { ...(rec.scores||{}) } } : { scores:{}, remakeStatus:"MISSING", remarks:"", gradingDate:"", remakeDate:"" });
+    const next = rec ? { ...rec, scores: { ...(rec.scores||{}) } } : { scores:{}, remakeStatus:"MISSING", remarks:"", gradingDate:"", remakeDate:"" };
+    setEdit(next);
     setSaveStatus("idle");
+    setTimeout(() => {
+      const firstEmpty = qList.find(q => {
+        const v = next.scores?.[q.id];
+        return v === undefined || v === null || String(v).trim() === "";
+      });
+      const target = firstEmpty ? firstEmpty.id : (qList[0] && qList[0].id);
+      if (target && inputRefs.current[target]) inputRefs.current[target].focus();
+    }, 50);
   };
 
   const persist = async (record, sid, hw) => {
@@ -565,13 +625,24 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
     }, 800);
   };
 
+  const onScoreChange = (q, raw) => {
+    const v = q.type === "MC" ? String(raw).toUpperCase() : raw;
+    const scores = { ...edit.scores, [q.id]: v };
+    const next = { ...edit, scores, remakeStatus: edit.remakeStatus==="MISSING"?"PENDING":edit.remakeStatus };
+    scheduleSave(next);
+    // 有輸入就跳下一空格（MC 輸入字母後；LQ 用 onKeyDown Enter）
+    if (q.type === "MC" && String(v).trim() !== "") {
+      focusNextEmpty(q.id, scores);
+    }
+  };
+
   const filteredStudents = activeStudents.filter(s => {
     if (filter==="ALL") return true;
     const st = homeworkScores[s.id]?.[selectedHw]?.remakeStatus || "MISSING";
     return st === filter;
   });
 
-  if (!map) return <div className="p-8 text-slate-400">請先在藍圖設定功課，或切換群組。</div>;
+  if (!map) return <div className="p-8 text-slate-400">請先在「功課設定」建立功課，或切換群組。</div>;
 
   return (
     <div className="grid lg:grid-cols-5 gap-4">
@@ -600,11 +671,11 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
         </div>
       </div>
       <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
-        {!edit || !selectedStudentId ? <p className="text-slate-400 p-8 text-center">選擇學生開始批改</p> : (
+        {!edit || !selectedStudentId ? <p className="text-slate-400 p-8 text-center">選擇學生開始批改（輸入後自動跳下一空格）</p> : (
           <div className="space-y-3">
             <div className="flex justify-between items-center">
               <div className="font-bold">{activeStudents.find(x=>x.id===selectedStudentId)?.name} · {selectedHw}</div>
-              <div className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":""}</div>
+              <div className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":"自動跳格已開"}</div>
             </div>
             <div className="flex flex-wrap gap-2">
               {Object.keys(STATUS_META).map(st=>(
@@ -615,7 +686,7 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
               ))}
             </div>
             <div className="space-y-2 max-h-[55vh] overflow-auto">
-              {(map.questions||[]).map(q => (
+              {qList.map(q => (
                 <div key={q.id} className="border rounded-xl p-2 flex gap-2 items-center">
                   <div className="w-24 shrink-0">
                     <div className="text-xs font-bold mono">{q.id}</div>
@@ -623,16 +694,29 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
                   </div>
                   <div className="flex-1 text-xs text-slate-600 truncate" title={q.topicDesc}>{q.topicId} {q.topicDesc}</div>
                   {q.type==="MC" ? (
-                    <input className="w-16 border rounded px-2 py-1 text-center font-bold uppercase" maxLength={4}
-                      value={edit.scores?.[q.id] ?? ""} onChange={e=>{
-                        const v=e.target.value.toUpperCase();
-                        scheduleSave({ ...edit, scores:{...edit.scores, [q.id]:v}, remakeStatus: edit.remakeStatus==="MISSING"?"PENDING":edit.remakeStatus });
-                      }} />
+                    <input
+                      ref={el => { if (el) inputRefs.current[q.id]=el; }}
+                      className="w-16 border rounded px-2 py-1 text-center font-bold uppercase"
+                      maxLength={4}
+                      value={edit.scores?.[q.id] ?? ""}
+                      onChange={e=>onScoreChange(q, e.target.value)}
+                      onKeyDown={e=>{ if (e.key==="Enter") { e.preventDefault(); focusNextEmpty(q.id, { ...edit.scores, [q.id]: e.target.value }); } }}
+                    />
                   ) : (
-                    <input type="number" className="w-20 border rounded px-2 py-1 text-center font-bold"
-                      value={edit.scores?.[q.id] ?? ""} onChange={e=>{
-                        scheduleSave({ ...edit, scores:{...edit.scores, [q.id]:e.target.value}, remakeStatus: edit.remakeStatus==="MISSING"?"PENDING":edit.remakeStatus });
-                      }} />
+                    <input
+                      ref={el => { if (el) inputRefs.current[q.id]=el; }}
+                      type="number"
+                      className="w-20 border rounded px-2 py-1 text-center font-bold"
+                      value={edit.scores?.[q.id] ?? ""}
+                      onChange={e=>onScoreChange(q, e.target.value)}
+                      onKeyDown={e=>{
+                        if (e.key==="Enter") {
+                          e.preventDefault();
+                          const scores = { ...edit.scores, [q.id]: e.target.value };
+                          focusNextEmpty(q.id, scores);
+                        }
+                      }}
+                    />
                   )}
                   {q.type==="MC" && q.ans && (
                     <span className={`text-xs font-bold ${(edit.scores?.[q.id]||"").toString().toUpperCase()===q.ans.toString().toUpperCase()?"text-emerald-600":"text-rose-500"}`}>
@@ -651,10 +735,11 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
   );
 }
 
-// ---------- Summary table ----------
 function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomeworkScores, currentCohort }) {
   const availableHws = useMemo(() => Object.keys(homeworkMaps||{}).filter(id => !homeworkMaps[id].cohort || homeworkMaps[id].cohort===currentCohort).sort(), [homeworkMaps, currentCohort]);
   const [included, setIncluded] = useState({});
+  const [editMode, setEditMode] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("idle");
   useEffect(() => {
     const o={}; availableHws.forEach(h=>o[h]=true); setIncluded(o);
   }, [availableHws.join("|")]);
@@ -676,8 +761,7 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
       const val = rec.scores?.[q.id];
       if (val===undefined||val===null||String(val).trim()==="") return;
       if (q.type==="MC") {
-        if (q.ans && String(val).toUpperCase()===String(q.ans).toUpperCase().split(",")[0]) t+=q.max;
-        else if (q.ans) {
+        if (q.ans) {
           const corrects = q.ans.toString().split(",").map(a=>a.trim().toUpperCase());
           if (corrects.includes(String(val).trim().toUpperCase())) t+=q.max;
         }
@@ -686,9 +770,52 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
     return t;
   };
 
+  const setCellStatus = async (sid, hw, status) => {
+    const prev = homeworkScores[sid]?.[hw] || { scores: {} };
+    const next = { ...prev, remakeStatus: status, remakeDate: status==="DONE"?new Date().toISOString().slice(0,10):(prev.remakeDate||"") };
+    setSaveStatus("saving");
+    try {
+      await saveHomeworkScore(sid, hw, next);
+      setHomeworkScores(p => ({ ...p, [sid]: { ...(p[sid]||{}), [hw]: next } }));
+      setSaveStatus("saved");
+      setTimeout(()=>setSaveStatus("idle"), 1000);
+    } catch(e) { setSaveStatus("idle"); alert(e.message); }
+  };
+
+  const exportExcel = () => {
+    const hws = availableHws.filter(h=>included[h]);
+    const header = ["班別","學號","姓名","學生ID", ...hws.map(h=>h+"分數"), ...hws.map(h=>h+"狀態")];
+    const rows = activeStudents.map(s => {
+      const scores = hws.map(h => { const sc=scoreOf(s.id,h); return sc===null?"":sc; });
+      const statuses = hws.map(h => homeworkScores[s.id]?.[h]?.remakeStatus || "MISSING");
+      return [s.class, s.num, s.name, s.id, ...scores, ...statuses];
+    });
+    const csv = [header, ...rows].map(r => r.map(c => {
+      const x = String(c??"");
+      return /[",\n]/.test(x) ? `"${x.replace(/"/g,'""')}"` : x;
+    }).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF"+csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "homework_summary.csv";
+    a.click();
+  };
+
+  const cols = availableHws.filter(h=>included[h]);
+
   return (
     <div className="bg-white rounded-2xl border p-4 space-y-3">
-      <h2 className="font-bold">功課成績總表</h2>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-bold">功課成績總表</h2>
+        <div className="flex flex-wrap gap-2 items-center">
+          <span className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":""}</span>
+          <button className={`text-sm font-bold px-3 py-1.5 rounded-lg border ${editMode?"bg-amber-500 text-white border-amber-500":"bg-amber-50 text-amber-800 border-amber-200"}`} onClick={()=>setEditMode(m=>!m)}>
+            {editMode ? "結束編輯" : "開啟快速編輯"}
+          </button>
+          <button className="text-sm font-bold px-3 py-1.5 rounded-lg bg-emerald-600 text-white" onClick={exportExcel}>匯出 Excel (CSV)</button>
+        </div>
+      </div>
+      {editMode && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">編輯模式：點格子內狀態可直接改（未交／欠改正／已改正／完美／豁免）。</p>}
       <div className="flex flex-wrap gap-2">
         {availableHws.map(id=>(
           <label key={id} className="text-xs font-bold flex items-center gap-1 border rounded-lg px-2 py-1">
@@ -704,7 +831,7 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
               <th className="text-left px-2 py-2">班</th>
               <th className="text-left px-2 py-2">號</th>
               <th className="text-left px-2 py-2">姓名</th>
-              {availableHws.filter(h=>included[h]).map(h=>(
+              {cols.map(h=>(
                 <th key={h} className="text-center px-2 py-2 text-xs">{h}<div className="text-[10px] font-normal text-slate-400">/{hwMax[h]}</div></th>
               ))}
             </tr>
@@ -715,14 +842,19 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
                 <td className="px-2 py-1">{s.class}</td>
                 <td className="px-2 py-1">{s.num}</td>
                 <td className="px-2 py-1 font-semibold">{s.name}</td>
-                {availableHws.filter(h=>included[h]).map(h=>{
+                {cols.map(h=>{
                   const rec = homeworkScores[s.id]?.[h];
                   const sc = scoreOf(s.id,h);
                   const st = rec?.remakeStatus || "MISSING";
                   return (
                     <td key={h} className="px-2 py-1 text-center">
                       <div className="font-bold">{sc===null?"-":sc}</div>
-                      <Badge status={st} />
+                      {editMode ? (
+                        <select className="text-[10px] border rounded mt-0.5 max-w-[90px]" value={st}
+                          onChange={e=>setCellStatus(s.id, h, e.target.value)}>
+                          {Object.keys(STATUS_META).map(k=><option key={k} value={k}>{STATUS_META[k].label}</option>)}
+                        </select>
+                      ) : <Badge status={st} />}
                     </td>
                   );
                 })}
@@ -735,27 +867,36 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
   );
 }
 
-// ---------- Chase missing / remake ----------
 function HwChaseView({ activeStudents, homeworkMaps, homeworkScores, setHomeworkScores, currentCohort }) {
   const availableHws = useMemo(() => Object.keys(homeworkMaps||{}).filter(id => !homeworkMaps[id].cohort || homeworkMaps[id].cohort===currentCohort).sort(), [homeworkMaps, currentCohort]);
-  const [hwFilter, setHwFilter] = useState("ALL");
-  const [typeFilter, setTypeFilter] = useState("BOTH"); // MISSING | PENDING | BOTH
+  const [typeFilter, setTypeFilter] = useState("BOTH");
+  const [expanded, setExpanded] = useState(null);
 
-  const rows = useMemo(() => {
-    const list = [];
+  const byStudent = useMemo(() => {
+    const map = {};
     activeStudents.forEach(s => {
+      const items = [];
       availableHws.forEach(hw => {
-        if (hwFilter!=="ALL" && hw!==hwFilter) return;
         const st = homeworkScores[s.id]?.[hw]?.remakeStatus || "MISSING";
         if (typeFilter==="BOTH" && st!=="MISSING" && st!=="PENDING") return;
         if (typeFilter==="MISSING" && st!=="MISSING") return;
         if (typeFilter==="PENDING" && st!=="PENDING") return;
-        list.push({ student: s, hw, status: st, rec: homeworkScores[s.id]?.[hw] });
+        const rec = homeworkScores[s.id]?.[hw];
+        const qs = (homeworkMaps[hw]?.questions)||[];
+        items.push({
+          hw, status: st, rec,
+          title: homeworkMaps[hw]?.title || hw,
+          questions: qs,
+          missingQ: qs.filter(q => {
+            const v = rec?.scores?.[q.id];
+            return v===undefined||v===null||String(v).trim()==="";
+          }).map(q=>q.id)
+        });
       });
+      if (items.length) map[s.id] = { student: s, items };
     });
-    list.sort((a,b)=> String(a.student.class).localeCompare(String(b.student.class)) || (Number(a.student.num)||0)-(Number(b.student.num)||0) || a.hw.localeCompare(b.hw));
-    return list;
-  }, [activeStudents, availableHws, homeworkScores, hwFilter, typeFilter]);
+    return Object.values(map).sort((a,b)=> String(a.student.class).localeCompare(String(b.student.class)) || (Number(a.student.num)||0)-(Number(b.student.num)||0));
+  }, [activeStudents, availableHws, homeworkScores, typeFilter, homeworkMaps]);
 
   const setStatus = async (sid, hw, status) => {
     const prev = homeworkScores[sid]?.[hw] || { scores:{} };
@@ -767,54 +908,79 @@ function HwChaseView({ activeStudents, homeworkMaps, homeworkScores, setHomework
   return (
     <div className="bg-white rounded-2xl border p-4 space-y-3">
       <h2 className="font-bold text-lg">追欠交功課及改正區</h2>
-      <p className="text-sm text-slate-500">集中顯示未交（MISSING）與欠改正（PENDING），可直接改狀態。</p>
-      <div className="flex flex-wrap gap-2">
-        <select className="border rounded-lg px-2 py-1 text-sm" value={hwFilter} onChange={e=>setHwFilter(e.target.value)}>
-          <option value="ALL">全部功課</option>
-          {availableHws.map(h=><option key={h} value={h}>{h} — {homeworkMaps[h].title}</option>)}
-        </select>
+      <p className="text-sm text-slate-500">以<strong>學生</strong>為單位。點開可看欠哪些功課、題目概要，方便當面解答。</p>
+      <div className="flex flex-wrap gap-2 items-center">
         <select className="border rounded-lg px-2 py-1 text-sm" value={typeFilter} onChange={e=>setTypeFilter(e.target.value)}>
           <option value="BOTH">未交 + 欠改正</option>
           <option value="MISSING">只看未交</option>
           <option value="PENDING">只看欠改正</option>
         </select>
-        <span className="text-sm text-slate-500 self-center">共 {rows.length} 筆</span>
+        <span className="text-sm text-slate-500">共 {byStudent.length} 位同學</span>
       </div>
-      <div className="overflow-auto max-h-[70vh]">
-        <table className="min-w-full text-sm">
-          <thead className="sticky top-0 bg-slate-50">
-            <tr>
-              {["班","號","姓名","學生ID","功課","狀態","快速操作"].map(h=><th key={h} className="text-left px-2 py-2 text-xs text-slate-500">{h}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r,i)=>(
-              <tr key={r.student.id+"-"+r.hw+"-"+i} className="border-t">
-                <td className="px-2 py-1">{r.student.class}</td>
-                <td className="px-2 py-1">{r.student.num}</td>
-                <td className="px-2 py-1 font-semibold">{r.student.name}</td>
-                <td className="px-2 py-1 mono text-xs">{r.student.id}</td>
-                <td className="px-2 py-1"><span className="mono text-xs text-indigo-700">{r.hw}</span><div className="text-[10px] text-slate-400">{homeworkMaps[r.hw]?.title}</div></td>
-                <td className="px-2 py-1"><Badge status={r.status}/></td>
-                <td className="px-2 py-1">
-                  <div className="flex flex-wrap gap-1">
-                    {r.status==="MISSING" && <button className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100" onClick={()=>setStatus(r.student.id,r.hw,"PENDING")}>標為已交待改</button>}
-                    {r.status==="PENDING" && <button className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-700" onClick={()=>setStatus(r.student.id,r.hw,"DONE")}>已改正</button>}
-                    <button className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700" onClick={()=>setStatus(r.student.id,r.hw,"PERFECT")}>完美</button>
-                    <button className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-700" onClick={()=>setStatus(r.student.id,r.hw,"EXEMPT")}>豁免</button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {!rows.length && <tr><td colSpan={7} className="px-2 py-8 text-center text-slate-400">沒有符合的欠交／欠改正紀錄 🎉</td></tr>}
-          </tbody>
-        </table>
+      <div className="space-y-2 max-h-[75vh] overflow-auto">
+        {byStudent.map(({ student: s, items }) => {
+          const open = expanded === s.id;
+          const nMiss = items.filter(i=>i.status==="MISSING").length;
+          const nPend = items.filter(i=>i.status==="PENDING").length;
+          return (
+            <div key={s.id} className="border rounded-xl overflow-hidden">
+              <button className="w-full flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-slate-50 hover:bg-slate-100 text-left"
+                onClick={()=>setExpanded(open?null:s.id)}>
+                <div>
+                  <span className="font-bold">{s.class}-{s.num} {s.name}</span>
+                  <span className="ml-2 text-xs mono text-slate-400">{s.id}</span>
+                </div>
+                <div className="flex gap-2 text-[11px] font-bold">
+                  {nMiss>0 && <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">未交 {nMiss}</span>}
+                  {nPend>0 && <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">欠改正 {nPend}</span>}
+                  <span className="text-slate-400">{open?"收起":"詳細"}</span>
+                </div>
+              </button>
+              {open && (
+                <div className="p-3 space-y-3 bg-white">
+                  {items.map(it => (
+                    <div key={it.hw} className="border rounded-xl p-3 space-y-2">
+                      <div className="flex flex-wrap justify-between gap-2 items-start">
+                        <div>
+                          <div className="font-bold text-indigo-700 mono text-sm">{it.hw}</div>
+                          <div className="font-semibold text-sm">{it.title}</div>
+                          <Badge status={it.status} />
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {it.status==="MISSING" && <button className="text-[10px] font-bold px-2 py-1 rounded bg-slate-100" onClick={()=>setStatus(s.id,it.hw,"PENDING")}>標已交待改</button>}
+                          {it.status==="PENDING" && <button className="text-[10px] font-bold px-2 py-1 rounded bg-blue-100 text-blue-700" onClick={()=>setStatus(s.id,it.hw,"DONE")}>已改正</button>}
+                          <button className="text-[10px] font-bold px-2 py-1 rounded bg-emerald-50 text-emerald-700" onClick={()=>setStatus(s.id,it.hw,"PERFECT")}>完美</button>
+                          <button className="text-[10px] font-bold px-2 py-1 rounded bg-amber-50 text-amber-700" onClick={()=>setStatus(s.id,it.hw,"EXEMPT")}>豁免</button>
+                        </div>
+                      </div>
+                      <div className="text-xs text-slate-600 bg-slate-50 rounded-lg p-2">
+                        <div className="font-bold text-slate-500 mb-1">題目概要（{it.questions.length} 題）
+                          {it.missingQ.length>0 && <span className="text-rose-600 ml-1">· 未填 {it.missingQ.join(", ")}</span>}
+                        </div>
+                        <ul className="space-y-0.5 max-h-32 overflow-auto">
+                          {it.questions.map(q=>(
+                            <li key={q.id} className="truncate">
+                              <span className="mono font-bold text-slate-700">{q.id}</span>
+                              <span className="text-slate-400 mx-1">{q.type}/{q.max}</span>
+                              {q.topicId} {q.topicDesc}
+                            </li>
+                          ))}
+                        </ul>
+                        {it.rec?.remarks && <div className="mt-1 text-amber-800">備註：{it.rec.remarks}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {!byStudent.length && <div className="text-center text-slate-400 py-10">沒有符合的欠交／欠改正 🎉</div>}
       </div>
     </div>
   );
 }
 
-// ---------- App ----------
 function App() {
   const [view, setView] = useState("import");
   const [students, setStudents] = useState([]);
@@ -859,7 +1025,7 @@ function App() {
         </div>
         {view==="import" && <ImportView onReload={reload} />}
         {view==="idMap" && <IdMapView students={students} onReload={reload} />}
-        {view==="pins" && <PinsView students={students} />}
+        {view==="pins" && <PinsView students={students} onReload={reload} />}
         {view==="hwSettings" && <HwSettingsView students={students} homeworkMaps={homeworkMaps} setHomeworkMaps={setHomeworkMaps} currentCohort={cohort==="所有學生"?(cohorts[1]||""):cohort} />}
         {view==="hwGrade" && <HwGradeView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
         {view==="hwSummary" && <HwSummaryView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
