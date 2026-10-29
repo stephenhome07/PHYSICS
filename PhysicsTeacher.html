@@ -237,6 +237,35 @@ async function deleteExamMap(examId) {
   await db.collection("examMaps").doc(String(examId)).delete();
 }
 
+async function loadExamScoresForExam(studentIds, examId) {
+  const out = {};
+  const chunk = 20;
+  for (let i = 0; i < studentIds.length; i += chunk) {
+    const slice = studentIds.slice(i, i + chunk);
+    await Promise.all(slice.map(async sid => {
+      try {
+        const snap = await db.collection("scores").doc(sid).collection("exams").doc(String(examId)).get();
+        if (snap.exists) {
+          if (!out[sid]) out[sid] = {};
+          out[sid][examId] = snap.data();
+        }
+      } catch (e) { console.warn(sid, examId, e); }
+    }));
+  }
+  return out;
+}
+
+async function saveExamScore(studentId, examId, record) {
+  await db.collection("scores").doc(studentId).collection("exams").doc(String(examId)).set({
+    ...record,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+
+async function deleteExamScore(studentId, examId) {
+  await db.collection("scores").doc(studentId).collection("exams").doc(String(examId)).delete();
+}
+
 /** 考試是否適用該群組：無 cohort = 全組通用 */
 function examVisibleForCohort(map, cohort) {
   return quizVisibleForCohort(map, cohort);
@@ -353,6 +382,7 @@ function Sidebar({ view, setView }) {
       </div>
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">考試</div>
+        <Item id="examInput" label="考試成績輸入及分析" />
         <Item id="examSettings" label="考試內容設定" />
       </div>
     </aside>
@@ -2971,6 +3001,473 @@ function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
 }
 
 
+
+function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamScores, currentCohort }) {
+  const examIds = useMemo(
+    () => Object.keys(examMaps || {}).filter(id => examVisibleForCohort(examMaps[id], currentCohort)).sort(),
+    [examMaps, currentCohort]
+  );
+  const [selectedExam, setSelectedExam] = useState(examIds[0] || "");
+  const [selectedStudentId, setSelectedStudentId] = useState("");
+  const [saveStatus, setSaveStatus] = useState("idle");
+  const [loading, setLoading] = useState(false);
+  const [sortMode, setSortMode] = useState("question"); // question | pAsc | pDesc
+  const inputRefs = useRef({});
+  const timer = useRef(null);
+
+  const [aiMc, setAiMc] = useState(5);
+  const [aiLq, setAiLq] = useState(3);
+  const [aiLevel, setAiLevel] = useState("中");
+  const [aiExtra, setAiExtra] = useState({ practice: true, review: true, explainImg: false, ppt: false, notes: false });
+  const [aiSelected, setAiSelected] = useState([]);
+
+  useEffect(() => {
+    if (examIds.length && !examIds.includes(selectedExam)) setSelectedExam(examIds[0] || "");
+  }, [examIds]);
+
+  useEffect(() => {
+    if (!selectedExam || !activeStudents.length) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const part = await loadExamScoresForExam(activeStudents.map(s => s.id), selectedExam);
+        if (cancelled) return;
+        setExamScores(prev => {
+          const next = { ...prev };
+          activeStudents.forEach(s => {
+            next[s.id] = { ...(next[s.id] || {}) };
+            if (part[s.id] && part[s.id][selectedExam]) next[s.id][selectedExam] = part[s.id][selectedExam];
+            else if (next[s.id]) delete next[s.id][selectedExam];
+          });
+          return next;
+        });
+      } catch (e) { console.warn(e); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedExam, activeStudents.map(s => s.id).join(",")]);
+
+  const map = examMaps[selectedExam];
+  const qList = map?.questions || [];
+
+  const calcStudent = (sid) => {
+    if (!map) return null;
+    const rec = examScores[sid]?.[selectedExam] || {};
+    let mcScore = 0, mcMax = 0, lqScore = 0, lqMax = 0, any = false;
+    qList.forEach(q => {
+      const max = q.max || 1;
+      if (q.type === "MC") mcMax += max; else lqMax += max;
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      any = true;
+      if (q.type === "MC") {
+        if (q.ans) {
+          const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+          if (corrects.includes(String(raw).trim().toUpperCase())) mcScore += max;
+        }
+      } else {
+        lqScore += parseFloat(raw) || 0;
+      }
+    });
+    if (!any) return null;
+    let weighted = 0;
+    if (mcMax > 0 && lqMax > 0) weighted = (mcScore / mcMax) * 35 + (lqScore / lqMax) * 65;
+    else if (mcMax > 0) weighted = (mcScore / mcMax) * 100;
+    else if (lqMax > 0) weighted = (lqScore / lqMax) * 100;
+    return { mcScore, mcMax, lqScore, lqMax, total: mcScore + lqScore, max: mcMax + lqMax, weighted };
+  };
+
+  const focusNext = (fromQid) => {
+    const idx = qList.findIndex(q => q.id === fromQid);
+    if (idx < 0 || idx >= qList.length - 1) return;
+    const nextId = qList[idx + 1].id;
+    setTimeout(() => {
+      const el = inputRefs.current[nextId] || document.querySelector('[data-ex-qid="'+nextId+'"]');
+      if (el) { el.focus(); if (el.select) el.select(); }
+    }, 40);
+  };
+
+  const scheduleSave = (sid, examId, record) => {
+    setSaveStatus("saving");
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      try {
+        await saveExamScore(sid, examId, record);
+        setSaveStatus("saved");
+        setTimeout(() => setSaveStatus(s => s === "saved" ? "idle" : s), 1500);
+      } catch (e) { setSaveStatus("idle"); alert(e.message); }
+    }, 600);
+  };
+
+  const setQVal = (qid, raw, q) => {
+    if (!selectedStudentId || !selectedExam) return;
+    let stored = raw;
+    if (raw === "" || raw === null || raw === undefined) stored = "";
+    else if (q.type === "MC") stored = String(raw).toUpperCase().replace(/[^A-D]/g, "").slice(0, 1);
+    else stored = (raw === "" || isNaN(parseFloat(raw))) ? raw : parseFloat(raw);
+
+    setExamScores(prev => {
+      const prevRec = { ...(prev[selectedStudentId]?.[selectedExam] || {}) };
+      const nextRec = { ...prevRec, [qid]: stored };
+      const next = {
+        ...prev,
+        [selectedStudentId]: {
+          ...(prev[selectedStudentId] || {}),
+          [selectedExam]: nextRec
+        }
+      };
+      scheduleSave(selectedStudentId, selectedExam, nextRec);
+      return next;
+    });
+    if (stored !== "" && stored !== null) focusNext(qid);
+  };
+
+  const clearStudent = async () => {
+    if (!selectedStudentId || !selectedExam) return;
+    if (!confirm("清除此學生此考試全部成績？")) return;
+    try {
+      await deleteExamScore(selectedStudentId, selectedExam);
+      setExamScores(prev => {
+        const next = { ...prev };
+        if (next[selectedStudentId]) {
+          const copy = { ...next[selectedStudentId] };
+          delete copy[selectedExam];
+          next[selectedStudentId] = copy;
+        }
+        return next;
+      });
+    } catch (e) { alert(e.message); }
+  };
+
+  // Analysis stats
+  const attemptedStudents = useMemo(() => {
+    return activeStudents.filter(s => {
+      const rec = examScores[s.id]?.[selectedExam];
+      if (!rec) return false;
+      return qList.some(q => {
+        const v = rec[q.id];
+        return v !== undefined && v !== null && String(v).trim() !== "";
+      });
+    });
+  }, [activeStudents, examScores, selectedExam, qList]);
+
+  const qStats = useMemo(() => {
+    if (!map) return [];
+    return qList.map(q => {
+      let totalScore = 0, attempts = 0;
+      const counts = { A: 0, B: 0, C: 0, D: 0, Other: 0 };
+      attemptedStudents.forEach(s => {
+        const rec = examScores[s.id]?.[selectedExam];
+        if (!rec) return;
+        const val = rec[q.id];
+        if (val === undefined || val === null || String(val).trim() === "") return;
+        attempts++;
+        if (q.type === "MC") {
+          const ans = String(val).trim().toUpperCase();
+          if (["A","B","C","D"].includes(ans)) counts[ans]++;
+          else if (ans) counts.Other++;
+          const sc = quizQuestionScore(q, val);
+          if (sc != null) totalScore += sc;
+        } else {
+          totalScore += parseFloat(val) || 0;
+        }
+      });
+      const pValue = attempts > 0 && q.max > 0 ? totalScore / (attempts * q.max) : null;
+      let diag = "—", badgeColor = "text-slate-500 bg-slate-50 border-slate-200";
+      if (pValue != null) {
+        if (pValue < 0.40) { diag = "艱深"; badgeColor = "text-red-600 bg-red-50 border-red-200"; }
+        else if (pValue > 0.75) { diag = "容易"; badgeColor = "text-green-600 bg-green-50 border-green-200"; }
+        else { diag = "中等"; badgeColor = "text-amber-600 bg-amber-50 border-amber-200"; }
+      }
+      return {
+        ...q,
+        topicDesc: q.topicDesc || q.desc || "",
+        attempts,
+        totalScore,
+        pValue,
+        pct: pValue != null ? pValue * 100 : null,
+        diag,
+        badgeColor,
+        counts
+      };
+    });
+  }, [map, qList, attemptedStudents, examScores, selectedExam]);
+
+  const sortedStats = useMemo(() => {
+    const arr = qStats.slice();
+    if (sortMode === "pAsc") arr.sort((a, b) => (a.pct ?? 999) - (b.pct ?? 999));
+    else if (sortMode === "pDesc") arr.sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
+    else arr.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return arr;
+  }, [qStats, sortMode]);
+
+  useEffect(() => {
+    setAiSelected(qStats.filter(q => q.pct != null && q.pct < 60).map(q => q.id));
+  }, [selectedExam, qStats.map(q => q.id + ":" + Math.round(q.pct || 0)).join("|")]);
+
+  const classAvg = useMemo(() => {
+    if (!attemptedStudents.length || !map) return null;
+    let sumW = 0, n = 0;
+    attemptedStudents.forEach(s => {
+      const st = calcStudent(s.id);
+      if (st) { sumW += st.weighted; n++; }
+    });
+    return n ? sumW / n : null;
+  }, [attemptedStudents, examScores, selectedExam, map]);
+
+  const buildPrompt = () => {
+    const list = (aiSelected.length ? qStats.filter(q => aiSelected.includes(q.id)) : qStats.filter(q => q.pct != null && q.pct < 60));
+    const weakQ = list.map(q => formatWeakItem(q, `全班得分率 ${q.pct == null ? "—" : Math.round(q.pct) + "%"}，難度體感：${q.diag}`)).join("\n") || "- （無）";
+    const topicIds = list.map(q => q.topicId).filter(Boolean);
+    const syllabus = getSyllabusTableText(topicIds);
+    const tasks = [];
+    if (aiExtra.practice) tasks.push(`A. 針對性練習：${aiMc} MC + ${aiLq} LQ，難度「${aiLevel}」。每題標明 topicId。`);
+    if (aiExtra.review) tasks.push(`B. 約 15 分鐘試後檢討大綱（迷思、3 條 Concept Checking）。`);
+    if (aiExtra.explainImg) tasks.push(`C. 解說圖描述。`);
+    if (aiExtra.ppt) tasks.push(`D. PPT 大綱 8–12 頁。`);
+    if (aiExtra.notes) tasks.push(`E. 溫習筆記。`);
+    if (!tasks.length) tasks.push(`A. 練習 ${aiMc} MC + ${aiLq} LQ。`);
+    return `【身份】你是香港 DSE 物理科老師。
+
+【任務】全班剛完成考試「${map?.title || selectedExam}」（已入分 ${attemptedStudents.length} 人${classAvg != null ? `，加權平均約 ${classAvg.toFixed(1)}` : ""}）。
+
+【弱項／選中題目】（含 topicId）
+${weakQ}
+
+【課程大綱參考】
+${syllabus}
+
+【產出要求】
+${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
+
+【其他】繁體中文；對應 topicId；直接給內容。`;
+  };
+
+  if (!examIds.length) {
+    return <div className="p-8 text-slate-400">尚未有考試藍圖。請先到「考試內容設定」或匯入 examMaps。</div>;
+  }
+  if (!map) return <div className="p-8 text-slate-400">找不到考試資料</div>;
+
+  const rec = selectedStudentId ? (examScores[selectedStudentId]?.[selectedExam] || {}) : {};
+  const curStats = selectedStudentId ? calcStudent(selectedStudentId) : null;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-4 space-y-3">
+          <select className="w-full border rounded-lg px-2 py-2 text-sm font-bold" value={selectedExam}
+            onChange={e => { setSelectedExam(e.target.value); setSelectedStudentId(""); }}>
+            {examIds.map(id => <option key={id} value={id}>{id} — {examMaps[id].title || id}</option>)}
+          </select>
+          {loading && <div className="text-[11px] text-slate-400">載入此考試成績中…</div>}
+          <div className="max-h-[60vh] overflow-auto space-y-1">
+            {activeStudents.map(s => {
+              const st = calcStudent(s.id);
+              return (
+                <button key={s.id} onClick={() => setSelectedStudentId(s.id)}
+                  className={`w-full text-left px-3 py-2 rounded-xl border text-sm flex justify-between ${selectedStudentId===s.id?"border-purple-400 bg-purple-50":"border-slate-100 hover:bg-slate-50"}`}>
+                  <span><b>{s.class}-{s.num}</b> {s.name}</span>
+                  {st && (
+                    <span className="text-xs font-bold text-purple-700">
+                      {st.total}/{st.max}
+                      <span className="text-slate-400 font-normal ml-1">加權{st.weighted.toFixed(1)}</span>
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
+          {!selectedStudentId ? (
+            <p className="text-slate-400 p-8 text-center">選擇學生輸入考試成績</p>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap justify-between items-center gap-2">
+                <div className="font-bold">{activeStudents.find(x=>x.id===selectedStudentId)?.name} · {selectedExam}</div>
+                <div className="flex items-center gap-2">
+                  {curStats && <span className="text-sm font-bold text-purple-700">加權 {curStats.weighted.toFixed(1)}（MC {curStats.mcScore}/{curStats.mcMax} · LQ {curStats.lqScore}/{curStats.lqMax}）</span>}
+                  <span className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":""}</span>
+                  <button className="text-xs font-bold text-rose-600" onClick={clearStudent}>清除此卷</button>
+                </div>
+              </div>
+              <div className="space-y-2 max-h-[55vh] overflow-auto">
+                {qList.map(q => {
+                  const raw = rec[q.id];
+                  const has = raw !== undefined && raw !== null && String(raw).trim() !== "";
+                  let scoreColor = "border-slate-200 bg-white";
+                  if (has) {
+                    if (q.type === "MC") {
+                      const ok = q.ans && q.ans.toString().split(",").map(a=>a.trim().toUpperCase()).includes(String(raw).trim().toUpperCase());
+                      scoreColor = ok ? "border-emerald-400 bg-emerald-50 text-emerald-800" : "border-rose-400 bg-rose-50 text-rose-700";
+                    } else {
+                      const n = parseFloat(raw);
+                      if (!isNaN(n) && n <= 0) scoreColor = "border-rose-400 bg-rose-50 text-rose-700";
+                      else if (!isNaN(n) && n >= (q.max||0)) scoreColor = "border-emerald-400 bg-emerald-50 text-emerald-800";
+                      else scoreColor = "border-amber-400 bg-amber-50 text-amber-800";
+                    }
+                  }
+                  return (
+                    <div key={q.id} className="border rounded-xl p-2 flex gap-2 items-center">
+                      <div className="w-20 shrink-0">
+                        <div className="text-xs font-bold mono">{q.id}</div>
+                        <div className="text-[10px] text-slate-400">{q.type}</div>
+                      </div>
+                      <div className="flex-1 text-xs text-slate-600 truncate" title={q.topicDesc}>{q.topicId} {q.topicDesc}</div>
+                      <div className="flex items-center gap-1">
+                        {q.type === "MC" ? (
+                          <input data-ex-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}}
+                            className={`w-14 border-2 rounded px-1 py-1 text-center font-bold uppercase ${scoreColor}`}
+                            maxLength={1} value={raw ?? ""}
+                            onChange={e=>setQVal(q.id, e.target.value, q)}
+                            onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
+                          />
+                        ) : (
+                          <input data-ex-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}} type="number"
+                            className={`w-16 border-2 rounded px-1 py-1 text-center font-bold ${scoreColor}`}
+                            value={raw ?? ""}
+                            onChange={e=>setQVal(q.id, e.target.value, q)}
+                            onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
+                          />
+                        )}
+                        {q.type !== "MC" && <span className="text-[11px] font-bold text-slate-400">/{q.max}</span>}
+                        {q.type==="MC" && q.ans && <span className="text-[10px] text-slate-500 font-bold">{q.ans}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 考試弱點分析 */}
+      <div className="bg-white rounded-2xl border p-5 space-y-5">
+        <div className="flex flex-wrap justify-between gap-2 items-center">
+          <div>
+            <h3 className="font-bold text-lg">考試弱點分析 · {selectedExam} {map.title}</h3>
+            <p className="text-xs text-slate-500">已入分 {attemptedStudents.length} 人{classAvg != null ? ` · 全班加權平均 ${classAvg.toFixed(1)}` : ""}</p>
+          </div>
+          <label className="text-sm font-bold text-slate-600 flex items-center gap-2">
+            排序
+            <select className="border rounded-lg px-2 py-1.5 text-sm" value={sortMode} onChange={e=>setSortMode(e.target.value)}>
+              <option value="question">按題目</option>
+              <option value="pAsc">得分率由低至高</option>
+              <option value="pDesc">得分率由高至低</option>
+            </select>
+          </label>
+        </div>
+
+        {!attemptedStudents.length ? (
+          <p className="text-slate-400 text-sm">尚無足夠成績作分析</p>
+        ) : (
+          <>
+            <div className="grid md:grid-cols-3 gap-3">
+              {[
+                { title: "淺 (P ≥ 75%)", cls: "bg-emerald-50 border-emerald-200 text-emerald-800", filter: q => q.pct != null && q.pct >= 75 },
+                { title: "中 (40% ≤ P < 75%)", cls: "bg-amber-50 border-amber-200 text-amber-900", filter: q => q.pct != null && q.pct >= 40 && q.pct < 75 },
+                { title: "深 (P < 40%)", cls: "bg-rose-50 border-rose-200 text-rose-800", filter: q => q.pct != null && q.pct < 40 },
+              ].map((card, i) => {
+                const list = qStats.filter(card.filter);
+                return (
+                  <div key={i} className={`rounded-2xl border p-4 ${card.cls}`}>
+                    <div className="font-bold text-sm">{card.title}</div>
+                    <div className="text-3xl font-black my-2">{list.length} <span className="text-base">題</span></div>
+                    <div className="text-xs font-semibold break-words">{list.map(q=>q.id).join(", ") || "—"}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="overflow-auto max-h-96 border rounded-xl">
+              <table className="min-w-full text-xs">
+                <thead className="bg-purple-50 sticky top-0">
+                  <tr>
+                    <th className="px-2 py-2 text-left">選</th>
+                    <th className="px-2 py-2 text-left">題號</th>
+                    <th className="px-2 py-2 text-left">考核概念</th>
+                    <th className="px-2 py-2 text-center">topicId</th>
+                    <th className="px-2 py-2 text-center">作答</th>
+                    <th className="px-2 py-2 text-center">得分率</th>
+                    <th className="px-2 py-2 text-center">診斷</th>
+                    <th className="px-2 py-2 text-left">MC 選項分佈</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedStats.map(q => {
+                    const pctCls = q.pct == null ? "text-slate-400" : q.pct < 40 ? "text-rose-600 font-bold" : q.pct < 75 ? "text-amber-600 font-bold" : "text-emerald-600 font-bold";
+                    return (
+                      <tr key={q.id} className="border-t">
+                        <td className="px-2 py-1.5">
+                          <input type="checkbox" checked={aiSelected.includes(q.id)}
+                            onChange={() => setAiSelected(prev => prev.includes(q.id) ? prev.filter(x=>x!==q.id) : [...prev, q.id])} />
+                        </td>
+                        <td className="px-2 py-1.5 mono font-bold">{q.id}</td>
+                        <td className="px-2 py-1.5 max-w-[200px] truncate" title={q.topicDesc}>{q.topicDesc}</td>
+                        <td className="px-2 py-1.5 text-center mono text-[10px]">{q.topicId || "—"}</td>
+                        <td className="px-2 py-1.5 text-center">{q.attempts}</td>
+                        <td className={`px-2 py-1.5 text-center ${pctCls}`}>{q.pct == null ? "—" : q.pct.toFixed(1) + "%"}</td>
+                        <td className="px-2 py-1.5 text-center">
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${q.badgeColor}`}>{q.diag}</span>
+                        </td>
+                        <td className="px-2 py-1.5 text-[10px] text-slate-500">
+                          {q.type === "MC" ? `A${q.counts.A} B${q.counts.B} C${q.counts.C} D${q.counts.D}` : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="rounded-2xl border-2 border-violet-300 bg-violet-50 p-5 space-y-4">
+              <div className="font-black text-violet-900 text-lg">考試 AI Prompt</div>
+              <div className="flex flex-wrap gap-2">
+                <button className="px-3 py-1.5 rounded-lg bg-rose-100 text-rose-800 font-bold text-sm border"
+                  onClick={() => setAiSelected(qStats.filter(q=>q.pct!=null&&q.pct<60).map(q=>q.id))}>全選弱項(&lt;60%)</button>
+                <button className="px-3 py-1.5 rounded-lg bg-white border font-bold text-sm" onClick={() => setAiSelected(qStats.map(q=>q.id))}>全選</button>
+                <button className="px-3 py-1.5 rounded-lg bg-white border font-bold text-sm" onClick={() => setAiSelected([])}>清空</button>
+              </div>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <label className="text-sm font-bold">難度
+                  <select className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
+                    <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
+                  </select>
+                </label>
+                <label className="text-sm font-bold">MC
+                  <input type="number" className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
+                </label>
+                <label className="text-sm font-bold">LQ
+                  <input type="number" className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {[
+                  ["practice","弱項練習"],
+                  ["review","試後檢討"],
+                  ["explainImg","解說圖"],
+                  ["ppt","PPT"],
+                  ["notes","筆記"],
+                ].map(([k,lab])=>(
+                  <label key={k} className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 text-sm font-bold cursor-pointer ${aiExtra[k]?"border-violet-500 bg-white":"border-slate-200"}`}>
+                    <input type="checkbox" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} /> {lab}
+                  </label>
+                ))}
+              </div>
+              <button className="bg-violet-600 text-white font-black px-6 py-3 rounded-xl"
+                onClick={() => navigator.clipboard.writeText(buildPrompt()).then(()=>alert("已複製")).catch(()=>alert("失敗"))}>
+                複製 AI Prompt（已選 {aiSelected.length} 題 · 含 Syllabus）
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ExamSettingsView({ students, examMaps, setExamMaps, currentCohort }) {
   const cohorts = useMemo(() => Array.from(new Set(students.map(s => s.cohort).filter(Boolean))).sort(), [students]);
   const [selectedCohort, setSelectedCohort] = useState(currentCohort && currentCohort !== "所有學生" ? currentCohort : (cohorts[0] || ""));
@@ -3212,6 +3709,7 @@ function App() {
   const [quizMaps, setQuizMaps] = useState({});
   const [quizScores, setQuizScores] = useState({});
   const [examMaps, setExamMaps] = useState({});
+  const [examScores, setExamScores] = useState({});
   const [loading, setLoading] = useState(true);
   const [cohort, setCohort] = useState("所有學生");
 
@@ -3229,6 +3727,7 @@ function App() {
       await loadSyllabus();
       setHomeworkScores({});
       setQuizScores({});
+      setExamScores({});
     } catch(e) { alert("載入失敗："+e.message); }
     setLoading(false);
   }, []);
@@ -3261,6 +3760,7 @@ function App() {
         {view==="quizStudent" && <QuizStudentAnalysisView activeStudents={activeStudents} quizMaps={quizMaps} currentCohort={cohort} />}
         {view==="quizSummary" && <QuizSummaryView activeStudents={activeStudents} quizMaps={quizMaps} currentCohort={cohort} />}
         {view==="quizSettings" && <QuizSettingsView students={students} quizMaps={quizMaps} setQuizMaps={setQuizMaps} currentCohort={cohort} />}
+        {view==="examInput" && <ExamInputAnalysisView activeStudents={activeStudents} examMaps={examMaps} examScores={examScores} setExamScores={setExamScores} currentCohort={cohort} />}
         {view==="examSettings" && <ExamSettingsView students={students} examMaps={examMaps} setExamMaps={setExamMaps} currentCohort={cohort} />}
       </main>
     </div>
