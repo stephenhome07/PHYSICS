@@ -562,6 +562,15 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
   const sidRef = useRef("");
   const hwRef = useRef("");
   const inputRefs = useRef({});
+  const pendingFocusRef = useRef(null);
+
+  // AI analysis controls
+  const [aiMc, setAiMc] = useState(10);
+  const [aiLq, setAiLq] = useState(2);
+  const [aiLevel, setAiLevel] = useState("中");
+  const [aiSelected, setAiSelected] = useState([]);
+  const [aiExtra, setAiExtra] = useState({ practice: true, explainImg: false, ppt: false, notes: false });
+
   useEffect(()=>{ editRef.current=edit; },[edit]);
   useEffect(()=>{ sidRef.current=selectedStudentId; },[selectedStudentId]);
   useEffect(()=>{ hwRef.current=selectedHw; },[selectedHw]);
@@ -569,19 +578,43 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
     if (availableHws.length && !availableHws.includes(selectedHw)) setSelectedHw(availableHws[0]||"");
   },[availableHws]);
 
+  // After React re-render, apply pending focus (fixes auto-jump lost on setState)
+  useEffect(() => {
+    const qid = pendingFocusRef.current;
+    if (!qid) return;
+    pendingFocusRef.current = null;
+    const t = setTimeout(() => {
+      const el = inputRefs.current[qid] || document.querySelector('[data-hw-qid="'+qid+'"]');
+      if (el) { el.focus(); if (el.select) el.select(); }
+    }, 50);
+    return () => clearTimeout(t);
+  });
+
   const map = homeworkMaps[selectedHw];
   const qList = (map && map.questions) ? map.questions : [];
 
-  const focusNextEmpty = (fromQid, scores) => {
+  const focusNext = (fromQid) => {
     const idx = qList.findIndex(q => q.id === fromQid);
+    if (idx < 0) return;
+    // 優先下一個空格；若後面都填了就去下一題
     for (let i = idx + 1; i < qList.length; i++) {
       const id = qList[i].id;
-      const v = scores?.[id];
+      const v = (editRef.current && editRef.current.scores) ? editRef.current.scores[id] : undefined;
       if (v === undefined || v === null || String(v).trim() === "") {
-        const el = inputRefs.current[id];
-        if (el) { setTimeout(() => { el.focus(); el.select && el.select(); }, 30); }
+        pendingFocusRef.current = id;
+        // force effect by toggling if same
+        const el = inputRefs.current[id] || document.querySelector('[data-hw-qid="'+id+'"]');
+        if (el) setTimeout(() => { el.focus(); if (el.select) el.select(); }, 60);
         return;
       }
+    }
+    if (idx + 1 < qList.length) {
+      const id = qList[idx + 1].id;
+      pendingFocusRef.current = id;
+      setTimeout(() => {
+        const el = inputRefs.current[id] || document.querySelector('[data-hw-qid="'+id+'"]');
+        if (el) { el.focus(); if (el.select) el.select(); }
+      }, 60);
     }
   };
 
@@ -598,8 +631,11 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
         return v === undefined || v === null || String(v).trim() === "";
       });
       const target = firstEmpty ? firstEmpty.id : (qList[0] && qList[0].id);
-      if (target && inputRefs.current[target]) inputRefs.current[target].focus();
-    }, 50);
+      if (target) {
+        const el = inputRefs.current[target] || document.querySelector('[data-hw-qid="'+target+'"]');
+        if (el) el.focus();
+      }
+    }, 80);
   };
 
   const persist = async (record, sid, hw) => {
@@ -617,6 +653,7 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
 
   const scheduleSave = (next) => {
     setEdit(next);
+    editRef.current = next;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       const sid = sidRef.current, hw = hwRef.current;
@@ -627,12 +664,13 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
 
   const onScoreChange = (q, raw) => {
     const v = q.type === "MC" ? String(raw).toUpperCase() : raw;
-    const scores = { ...edit.scores, [q.id]: v };
-    const next = { ...edit, scores, remakeStatus: edit.remakeStatus==="MISSING"?"PENDING":edit.remakeStatus };
+    const scores = { ...(editRef.current?.scores || edit?.scores || {}), [q.id]: v };
+    const base = editRef.current || edit;
+    const next = { ...base, scores, remakeStatus: base.remakeStatus==="MISSING"?"PENDING":base.remakeStatus };
     scheduleSave(next);
-    // 有輸入就跳下一空格（MC 輸入字母後；LQ 用 onKeyDown Enter）
-    if (q.type === "MC" && String(v).trim() !== "") {
-      focusNextEmpty(q.id, scores);
+    // MC：有字母就跳；LQ：有數字也跳（方便連續入分）
+    if (String(v).trim() !== "") {
+      focusNext(q.id);
     }
   };
 
@@ -642,9 +680,91 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
     return st === filter;
   });
 
+  // 全班題目表現分析
+  const questionStats = useMemo(() => {
+    if (!map?.questions) return [];
+    return map.questions.map(q => {
+      let attempts = 0, full = 0, earned = 0, maxPossible = 0;
+      activeStudents.forEach(s => {
+        const rec = homeworkScores[s.id]?.[selectedHw];
+        if (!rec?.scores) return;
+        const val = rec.scores[q.id];
+        if (val === undefined || val === null || String(val).trim() === "") return;
+        attempts++;
+        maxPossible += (q.max || 1);
+        if (q.type === "MC") {
+          if (q.ans) {
+            const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+            if (corrects.includes(String(val).trim().toUpperCase())) { full++; earned += (q.max||1); }
+          }
+        } else {
+          const n = parseFloat(val) || 0;
+          earned += n;
+          if (n >= (q.max||1)) full++;
+        }
+      });
+      const rate = attempts > 0 ? (q.type === "MC" ? full / attempts : (maxPossible > 0 ? earned / maxPossible : 0)) : null;
+      return { ...q, attempts, full, earned, maxPossible, rate };
+    });
+  }, [map, homeworkScores, activeStudents, selectedHw]);
+
+  const weakDefaultIds = useMemo(() =>
+    questionStats.filter(q => q.rate !== null && q.rate < 0.6).map(q => q.id),
+  [questionStats]);
+
+  useEffect(() => {
+    setAiSelected(weakDefaultIds);
+  }, [selectedHw, weakDefaultIds.join("|")]);
+
+  const buildPracticePrompt = () => {
+    const selected = questionStats.filter(q => aiSelected.includes(q.id));
+    const list = (selected.length ? selected : questionStats.filter(q => q.rate !== null && q.rate < 0.6));
+    const weakList = list.map(q => {
+      const pct = q.rate !== null ? Math.round(q.rate * 100) + "%" : "無資料";
+      return `- [${q.id}] ${q.topicId || ""} ${q.topicDesc || ""}（全班得分率 ${pct}，難度：${q.level || "中"}）`;
+    }).join("\n") || "- （請自行補充難點）";
+
+    const tasks = [];
+    if (aiExtra.practice) {
+      tasks.push(`A. 針對性練習卷：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ，難度「${aiLevel}」，繁體中文，貼近 HKDSE。MC 附常見錯項陷阱；LQ 附分步評分。`);
+    }
+    if (aiExtra.explainImg) {
+      tasks.push(`B. 解說圖片：為上述每條弱項各設計 1 張「可在簡報使用」的概念圖／示意圖描述（用文字詳細描述畫面構圖、標註、重點公式），方便我再交給繪圖 AI。`);
+    }
+    if (aiExtra.ppt) {
+      tasks.push(`C. PPT 大綱：以勾選的弱項為綱，產出 8–12 頁教學簡報大綱（每頁：標題、要點 bullet、建議圖示、老師口述提示）。`);
+    }
+    if (aiExtra.notes) {
+      tasks.push(`D. 溫習筆記：產出精簡筆記（定義 → 公式 → 易錯點 → 一例題），對應上述弱項。`);
+    }
+    if (!tasks.length) tasks.push(`A. 針對性練習卷：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ。`);
+
+    return `【身份】你是香港 DSE 物理科老師，學生約 Band 3。
+
+【任務】根據以下「功課弱項診斷」（功課 ${selectedHw}：${map?.title || ""}），完成指定產出。
+
+【難點列表】
+${weakList}
+
+【產出要求】
+${tasks.map((t,i)=>`${i+1}. ${t}`).join("\n")}
+
+【其他】
+- 語言：繁體中文
+- 題目須對應弱項，由淺入深
+- 不要多餘開場白，直接給內容`;
+  };
+
+  const copyPrompt = () => {
+    navigator.clipboard.writeText(buildPracticePrompt())
+      .then(() => alert("已複製 AI Prompt！可貼到 Gemini / ChatGPT。"))
+      .catch(() => alert("複製失敗，請重試"));
+  };
+
   if (!map) return <div className="p-8 text-slate-400">請先在「功課設定」建立功課，或切換群組。</div>;
 
   return (
+    <div className="space-y-4">
     <div className="grid lg:grid-cols-5 gap-4">
       <div className="lg:col-span-2 bg-white rounded-2xl border p-4 space-y-3">
         <select className="w-full border rounded-lg px-2 py-2 text-sm font-bold" value={selectedHw} onChange={e=>{setSelectedHw(e.target.value); setSelectedStudentId(""); setEdit(null);}}>
@@ -657,7 +777,7 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
             </button>
           ))}
         </div>
-        <div className="max-h-[65vh] overflow-auto space-y-1">
+        <div className="max-h-[55vh] overflow-auto space-y-1">
           {filteredStudents.map(s => {
             const st = homeworkScores[s.id]?.[selectedHw]?.remakeStatus || "MISSING";
             return (
@@ -671,11 +791,11 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
         </div>
       </div>
       <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
-        {!edit || !selectedStudentId ? <p className="text-slate-400 p-8 text-center">選擇學生開始批改（輸入後自動跳下一空格）</p> : (
+        {!edit || !selectedStudentId ? <p className="text-slate-400 p-8 text-center">選擇學生開始批改（輸入後自動跳下一格）</p> : (
           <div className="space-y-3">
             <div className="flex justify-between items-center">
               <div className="font-bold">{activeStudents.find(x=>x.id===selectedStudentId)?.name} · {selectedHw}</div>
-              <div className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":"自動跳格已開"}</div>
+              <div className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":"自動跳格"}</div>
             </div>
             <div className="flex flex-wrap gap-2">
               {Object.keys(STATUS_META).map(st=>(
@@ -685,7 +805,7 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
                 </button>
               ))}
             </div>
-            <div className="space-y-2 max-h-[55vh] overflow-auto">
+            <div className="space-y-2 max-h-[50vh] overflow-auto">
               {qList.map(q => (
                 <div key={q.id} className="border rounded-xl p-2 flex gap-2 items-center">
                   <div className="w-24 shrink-0">
@@ -695,25 +815,26 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
                   <div className="flex-1 text-xs text-slate-600 truncate" title={q.topicDesc}>{q.topicId} {q.topicDesc}</div>
                   {q.type==="MC" ? (
                     <input
+                      data-hw-qid={q.id}
                       ref={el => { if (el) inputRefs.current[q.id]=el; }}
                       className="w-16 border rounded px-2 py-1 text-center font-bold uppercase"
                       maxLength={4}
                       value={edit.scores?.[q.id] ?? ""}
                       onChange={e=>onScoreChange(q, e.target.value)}
-                      onKeyDown={e=>{ if (e.key==="Enter") { e.preventDefault(); focusNextEmpty(q.id, { ...edit.scores, [q.id]: e.target.value }); } }}
+                      onKeyDown={e=>{ if (e.key==="Enter" || e.key==="Tab") { e.preventDefault(); focusNext(q.id); } }}
                     />
                   ) : (
                     <input
+                      data-hw-qid={q.id}
                       ref={el => { if (el) inputRefs.current[q.id]=el; }}
                       type="number"
                       className="w-20 border rounded px-2 py-1 text-center font-bold"
                       value={edit.scores?.[q.id] ?? ""}
                       onChange={e=>onScoreChange(q, e.target.value)}
                       onKeyDown={e=>{
-                        if (e.key==="Enter") {
+                        if (e.key==="Enter" || e.key==="Tab") {
                           e.preventDefault();
-                          const scores = { ...edit.scores, [q.id]: e.target.value };
-                          focusNextEmpty(q.id, scores);
+                          focusNext(q.id);
                         }
                       }}
                     />
@@ -731,6 +852,83 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
           </div>
         )}
       </div>
+    </div>
+
+    {/* 功課分析 + AI Prompt */}
+    <div className="bg-white rounded-2xl border p-5 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-bold text-slate-800">本份功課分析 · {selectedHw} {map.title}</h3>
+        <span className="text-xs text-slate-400">預設勾選得分率 &lt; 60%</span>
+      </div>
+      <div className="overflow-auto max-h-56 border rounded-xl">
+        <table className="min-w-full text-xs">
+          <thead className="bg-slate-50 sticky top-0">
+            <tr>
+              <th className="px-2 py-2 text-left">選</th>
+              <th className="px-2 py-2 text-left">題號</th>
+              <th className="px-2 py-2 text-left">考點</th>
+              <th className="px-2 py-2 text-center">作答</th>
+              <th className="px-2 py-2 text-center">得分率</th>
+            </tr>
+          </thead>
+          <tbody>
+            {questionStats.map(q => {
+              const pct = q.rate === null ? null : Math.round(q.rate * 100);
+              const color = pct === null ? "text-slate-400" : pct < 40 ? "text-rose-600 font-bold" : pct < 60 ? "text-amber-600 font-bold" : "text-emerald-600 font-bold";
+              return (
+                <tr key={q.id} className="border-t">
+                  <td className="px-2 py-1.5">
+                    <input type="checkbox" checked={aiSelected.includes(q.id)}
+                      onChange={() => setAiSelected(prev => prev.includes(q.id) ? prev.filter(x=>x!==q.id) : [...prev, q.id])} />
+                  </td>
+                  <td className="px-2 py-1.5 mono font-bold">{q.id}</td>
+                  <td className="px-2 py-1.5 truncate max-w-[280px]" title={q.topicDesc}>{q.topicId} {q.topicDesc}</td>
+                  <td className="px-2 py-1.5 text-center">{q.attempts}</td>
+                  <td className={`px-2 py-1.5 text-center ${color}`}>{pct === null ? "—" : pct + "%"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex flex-wrap gap-2 text-[11px] font-bold">
+        <button className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-100" onClick={()=>setAiSelected(weakDefaultIds)}>全選弱項(&lt;60%)</button>
+        <button className="px-2 py-1 rounded bg-slate-100 text-slate-600 border" onClick={()=>setAiSelected(questionStats.map(q=>q.id))}>全選全部</button>
+        <button className="px-2 py-1 rounded bg-slate-100 text-slate-600 border" onClick={()=>setAiSelected([])}>清空</button>
+      </div>
+      <div className="grid sm:grid-cols-4 gap-3">
+        <label className="text-xs font-bold text-slate-500">難度
+          <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
+            <option value="淺">淺</option>
+            <option value="中">中</option>
+            <option value="深">深</option>
+          </select>
+        </label>
+        <label className="text-xs font-bold text-slate-500">MC 題數
+          <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
+        </label>
+        <label className="text-xs font-bold text-slate-500">LQ 題數
+          <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
+        </label>
+        <div className="text-xs font-bold text-slate-500">產出類型
+          <div className="mt-1 flex flex-wrap gap-2 font-semibold text-slate-700">
+            {[
+              ["practice","弱項練習"],
+              ["explainImg","解說圖描述"],
+              ["ppt","PPT 大綱"],
+              ["notes","筆記"],
+            ].map(([k,lab])=>(
+              <label key={k} className="flex items-center gap-1 text-[11px]">
+                <input type="checkbox" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} /> {lab}
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+      <button className="bg-violet-600 hover:bg-violet-700 text-white font-bold px-4 py-2.5 rounded-lg text-sm" onClick={copyPrompt}>
+        複製 AI Prompt（已選 {aiSelected.length} 題）
+      </button>
+    </div>
     </div>
   );
 }
@@ -815,7 +1013,7 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
           <button className="text-sm font-bold px-3 py-1.5 rounded-lg bg-emerald-600 text-white" onClick={exportExcel}>匯出 Excel (CSV)</button>
         </div>
       </div>
-      {editMode && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">編輯模式：點格子內狀態可直接改（未交／欠改正／已改正／完美／豁免）。</p>}
+      {editMode && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">編輯模式：下拉選單仍保留狀態顏色。可直接改未交／欠改正／已改正／完美／豁免。</p>}
       <div className="flex flex-wrap gap-2">
         {availableHws.map(id=>(
           <label key={id} className="text-xs font-bold flex items-center gap-1 border rounded-lg px-2 py-1">
@@ -846,13 +1044,18 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
                   const rec = homeworkScores[s.id]?.[h];
                   const sc = scoreOf(s.id,h);
                   const st = rec?.remakeStatus || "MISSING";
+                  const meta = STATUS_META[st] || STATUS_META.MISSING;
                   return (
                     <td key={h} className="px-2 py-1 text-center">
                       <div className="font-bold">{sc===null?"-":sc}</div>
                       {editMode ? (
-                        <select className="text-[10px] border rounded mt-0.5 max-w-[90px]" value={st}
+                        <select
+                          className={`text-[10px] font-bold border rounded mt-0.5 max-w-[100px] px-1 py-0.5 ${meta.cls}`}
+                          value={st}
                           onChange={e=>setCellStatus(s.id, h, e.target.value)}>
-                          {Object.keys(STATUS_META).map(k=><option key={k} value={k}>{STATUS_META[k].label}</option>)}
+                          {Object.keys(STATUS_META).map(k=>(
+                            <option key={k} value={k}>{STATUS_META[k].label}</option>
+                          ))}
                         </select>
                       ) : <Badge status={st} />}
                     </td>
