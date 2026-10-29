@@ -10,6 +10,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.9/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   body{font-family:"Segoe UI","PingFang TC","Noto Sans TC",sans-serif}
   .mono{font-family:ui-monospace,Menlo,monospace}
@@ -213,6 +214,31 @@ async function saveQuizScore(studentId, quizId, record) {
   }, { merge: true });
 }
 
+async function saveQuizMap(quizId, data) {
+  await db.collection("quizMaps").doc(String(quizId)).set({ ...data, updatedAt: new Date().toISOString() }, { merge: true });
+}
+
+async function deleteQuizMap(quizId) {
+  await db.collection("quizMaps").doc(String(quizId)).delete();
+}
+
+/** 小測是否適用於該群組：無 cohort = 全組通用 */
+function quizVisibleForCohort(map, cohort) {
+  if (!map) return false;
+  if (!map.cohort || map.cohort === "" || map.cohort === "所有學生") return true;
+  if (!cohort || cohort === "所有學生") return true;
+  return map.cohort === cohort;
+}
+
+async function loadAllQuizScoresForStudent(sid) {
+  const out = {};
+  try {
+    const snap = await db.collection("scores").doc(sid).collection("quizzes").get();
+    snap.forEach(d => { out[d.id] = d.data(); });
+  } catch (e) { console.warn(e); }
+  return out;
+}
+
 async function deleteQuizScore(studentId, quizId) {
   await db.collection("scores").doc(studentId).collection("quizzes").doc(String(quizId)).delete();
 }
@@ -301,6 +327,8 @@ function Sidebar({ view, setView }) {
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">小測</div>
         <Item id="quizInput" label="小測成績輸入及分析" />
+        <Item id="quizStudent" label="個人分析／表現圖表" />
+        <Item id="quizSettings" label="小測內容設定" />
       </div>
     </aside>
   );
@@ -1460,8 +1488,8 @@ function HwChaseView({ activeStudents, homeworkMaps, homeworkScores, setHomework
 }
 
 
-function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizScores }) {
-  const quizIds = useMemo(() => Object.keys(quizMaps || {}).sort(), [quizMaps]);
+function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizScores, currentCohort }) {
+  const quizIds = useMemo(() => Object.keys(quizMaps || {}).filter(id => quizVisibleForCohort(quizMaps[id], currentCohort)).sort(), [quizMaps, currentCohort]);
   const [selectedQuiz, setSelectedQuiz] = useState(quizIds[0] || "");
   const [selectedStudentId, setSelectedStudentId] = useState("");
   const [saveStatus, setSaveStatus] = useState("idle");
@@ -2173,6 +2201,421 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
   );
 }
 
+
+function QuizSettingsView({ students, quizMaps, setQuizMaps, currentCohort }) {
+  const cohorts = useMemo(() => Array.from(new Set(students.map(s => s.cohort).filter(Boolean))).sort(), [students]);
+  const [selectedCohort, setSelectedCohort] = useState(currentCohort && currentCohort !== "所有學生" ? currentCohort : (cohorts[0] || ""));
+  const [quizId, setQuizId] = useState("");
+  const [quizTitle, setQuizTitle] = useState("");
+  const [pasteData, setPasteData] = useState("");
+  const [editingOriginalId, setEditingOriginalId] = useState(null);
+  const [assignCohort, setAssignCohort] = useState(""); // "" = 所有群組
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (currentCohort && currentCohort !== "所有學生") setSelectedCohort(currentCohort);
+  }, [currentCohort]);
+
+  const listIds = useMemo(() => Object.keys(quizMaps || {}).sort(), [quizMaps]);
+
+  const parseLines = (text) => {
+    return text.trim().split("\n").map(line => {
+      const clean = line.trim(); if (!clean) return null;
+      let cols = clean.split("\t").map(c => c.trim());
+      if (cols.length < 6) {
+        const multi = clean.split(/\s{2,}/).map(c => c.trim()).filter(Boolean);
+        if (multi.length >= 6) cols = multi;
+      }
+      // 9欄：題號 題型 滿分 難度 課題編號 描述 答案 （或含小測編號標題於貼上整表時另處理）
+      let maxScore = parseFloat(cols[2]); if (isNaN(maxScore) || maxScore <= 0) maxScore = 1;
+      const type = (cols[1] || "MC").toUpperCase();
+      return {
+        id: (cols[0] || "").trim(),
+        type,
+        max: maxScore,
+        level: (cols[3] || "中").trim(),
+        topicId: (cols[4] || "").trim(),
+        topicDesc: (cols[5] || "").trim(),
+        ans: (cols[6] || "").trim().toUpperCase()
+      };
+    }).filter(q => q && q.id && !String(q.id).includes("題目") && !String(q.id).includes("編號"));
+  };
+
+  const loadEdit = (id) => {
+    const m = quizMaps[id];
+    if (!m) return;
+    setEditingOriginalId(id);
+    setQuizId(id);
+    setQuizTitle(m.title || "");
+    setAssignCohort(m.cohort || "");
+    let text = "";
+    (m.questions || []).forEach(q => {
+      text += `${q.id}\t${q.type}\t${q.max}\t${q.level || "中"}\t${q.topicId || ""}\t${q.topicDesc || ""}\t${q.ans || ""}\n`;
+    });
+    setPasteData(text);
+  };
+
+  const handleSave = async () => {
+    if (!quizId.trim() || !quizTitle.trim()) return alert("請填寫小測編號與標題");
+    const questions = parseLines(pasteData);
+    if (!questions.length) return alert("無法解析題目（需要：題號 題型 滿分 難度 課題編號 描述 [答案]）");
+    // 新寫入：若未指定群組，用目前選擇的群組；明確選「所有群組」則 cohort 空白
+    let cohortVal = assignCohort;
+    if (editingOriginalId == null && cohortVal === undefined) {
+      cohortVal = selectedCohort || "";
+    }
+    // 使用者在表單選「所有群組」→ 空字串
+    if (cohortVal === "所有學生") cohortVal = "";
+    setBusy(true);
+    try {
+      const newId = quizId.trim();
+      const oldId = editingOriginalId;
+      const data = { title: quizTitle.trim(), questions, cohort: cohortVal || "" };
+      await saveQuizMap(newId, data);
+      const next = { ...quizMaps, [newId]: { ...data, _id: newId } };
+      if (oldId && oldId !== newId) {
+        await deleteQuizMap(oldId);
+        delete next[oldId];
+        // 遷移成績 doc id
+        const stuSnap = await db.collection("students").get();
+        for (const d of stuSnap.docs) {
+          const ref = db.collection("scores").doc(d.id).collection("quizzes").doc(oldId);
+          const snap = await ref.get();
+          if (snap.exists) {
+            await db.collection("scores").doc(d.id).collection("quizzes").doc(newId).set(snap.data(), { merge: true });
+            await ref.delete();
+          }
+        }
+      }
+      setQuizMaps(next);
+      setEditingOriginalId(newId);
+      alert("已儲存小測藍圖" + (data.cohort ? `（群組：${data.cohort}）` : "（所有群組通用）"));
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm(`確定刪除小測藍圖「${id}」？\n（成績文件不會自動刪，只刪題目設定）`)) return;
+    setBusy(true);
+    try {
+      await deleteQuizMap(id);
+      const next = { ...quizMaps };
+      delete next[id];
+      setQuizMaps(next);
+      if (editingOriginalId === id) {
+        setEditingOriginalId(null); setQuizId(""); setQuizTitle(""); setPasteData(""); setAssignCohort("");
+      }
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const saveCohortOnly = async (id, cohort) => {
+    const m = quizMaps[id];
+    if (!m) return;
+    const c = cohort === "所有學生" ? "" : cohort;
+    try {
+      await saveQuizMap(id, { ...m, cohort: c });
+      setQuizMaps(prev => ({ ...prev, [id]: { ...m, cohort: c } }));
+    } catch (e) { alert(e.message); }
+  };
+
+  return (
+    <div className="grid lg:grid-cols-5 gap-4">
+      <div className="lg:col-span-2 bg-white rounded-2xl border p-4 space-y-3">
+        <h2 className="font-bold">小測列表</h2>
+        <p className="text-[11px] text-slate-500">無群組 = 所有群組可見。可在此為舊小測補上群組。</p>
+        <div className="max-h-[70vh] overflow-auto space-y-1">
+          {listIds.map(id => {
+            const m = quizMaps[id];
+            return (
+              <div key={id} className={`border rounded-xl p-2 ${editingOriginalId===id?"border-indigo-400 bg-indigo-50":"border-slate-100"}`}>
+                <button className="w-full text-left" onClick={() => loadEdit(id)}>
+                  <div className="font-bold text-sm mono">{id}</div>
+                  <div className="text-xs text-slate-600 truncate">{m.title}</div>
+                  <div className="text-[10px] text-slate-400">{(m.questions||[]).length} 題 · {m.cohort ? `群組 ${m.cohort}` : "所有群組通用"}</div>
+                </button>
+                <div className="mt-1 flex gap-1 items-center">
+                  <select className="text-[10px] border rounded flex-1 py-0.5" value={m.cohort || "所有學生"}
+                    onChange={e => saveCohortOnly(id, e.target.value)}>
+                    <option value="所有學生">所有群組</option>
+                    {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <button className="text-[10px] text-rose-600 font-bold" onClick={() => handleDelete(id)}>刪</button>
+                </div>
+              </div>
+            );
+          })}
+          {!listIds.length && <p className="text-slate-400 text-sm">尚無小測，請右側新增或匯入。</p>}
+        </div>
+      </div>
+      <div className="lg:col-span-3 bg-white rounded-2xl border p-4 space-y-3">
+        <h2 className="font-bold">{editingOriginalId ? `編輯：${editingOriginalId}` : "新增小測"}</h2>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <label className="text-xs font-bold text-slate-500">小測編號
+            <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm font-bold" value={quizId} onChange={e=>setQuizId(e.target.value)} />
+          </label>
+          <label className="text-xs font-bold text-slate-500">標題
+            <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={quizTitle} onChange={e=>setQuizTitle(e.target.value)} />
+          </label>
+          <label className="text-xs font-bold text-slate-500">所屬群組
+            <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={assignCohort || "所有學生"} onChange={e=>setAssignCohort(e.target.value === "所有學生" ? "" : e.target.value)}>
+              <option value="所有學生">所有群組通用</option>
+              {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <div className="text-[11px] text-slate-500 flex items-end pb-2">
+            新建立時建議選目前群組「{selectedCohort || "—"}」；舊卷可維持通用或改指定。
+          </div>
+        </div>
+        <label className="text-xs font-bold text-slate-500 block">題目（Tab 分隔：題號 題型 滿分 難度 課題編號 描述 [答案]）
+          <textarea className="mt-1 w-full border rounded-xl p-2 text-xs mono h-56" value={pasteData} onChange={e=>setPasteData(e.target.value)}
+            placeholder={"MC1\tMC\t1\t淺\t2.1.1\t辨識單位\tB\nLQ1a\tLQ\t2\t中\t2.1.2\t解釋...\t"} />
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <button disabled={busy} className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-lg text-sm disabled:opacity-50" onClick={handleSave}>
+            {busy ? "儲存中…" : "儲存到 Firebase"}
+          </button>
+          <button className="border font-bold px-4 py-2 rounded-lg text-sm" onClick={() => {
+            setEditingOriginalId(null); setQuizId(""); setQuizTitle(""); setPasteData("");
+            setAssignCohort(selectedCohort || "");
+          }}>清空／新增</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
+  const [sid, setSid] = useState(activeStudents[0]?.id || "");
+  const [scores, setScores] = useState({}); // quizId -> record
+  const [loading, setLoading] = useState(false);
+  const chartRef = useRef(null);
+  const chartInst = useRef(null);
+  const [aiMc, setAiMc] = useState(10);
+  const [aiLq, setAiLq] = useState(2);
+  const [aiLevel, setAiLevel] = useState("中");
+  const [aiExtra, setAiExtra] = useState({ practice: true, explainImg: false, ppt: false, notes: false });
+
+  const visibleQuizzes = useMemo(
+    () => Object.keys(quizMaps || {}).filter(id => quizVisibleForCohort(quizMaps[id], currentCohort)).sort(),
+    [quizMaps, currentCohort]
+  );
+
+  useEffect(() => {
+    if (activeStudents.length && !activeStudents.find(s => s.id === sid)) {
+      setSid(activeStudents[0].id);
+    }
+  }, [activeStudents]);
+
+  useEffect(() => {
+    if (!sid) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      const data = await loadAllQuizScoresForStudent(sid);
+      if (!cancelled) { setScores(data); setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [sid]);
+
+  const rows = useMemo(() => {
+    return visibleQuizzes.map(qid => {
+      const map = quizMaps[qid];
+      const rec = scores[qid];
+      if (!map) return null;
+      let total = 0, max = 0, any = false;
+      (map.questions || []).forEach(q => {
+        max += (q.max || 0);
+        if (!rec) return;
+        const raw = rec[q.id];
+        if (raw === undefined || raw === null || String(raw).trim() === "") return;
+        any = true;
+        const sc = quizQuestionScore(q, raw);
+        if (sc != null) total += sc;
+      });
+      const pct = any && max > 0 ? (total / max) * 100 : null;
+      return { qid, title: map.title || qid, total: any ? total : null, max, pct };
+    }).filter(Boolean);
+  }, [visibleQuizzes, quizMaps, scores]);
+
+  const avgPct = useMemo(() => {
+    const withScore = rows.filter(r => r.pct != null);
+    if (!withScore.length) return null;
+    return withScore.reduce((a, r) => a + r.pct, 0) / withScore.length;
+  }, [rows]);
+
+  const weakItems = useMemo(() => {
+    const items = [];
+    visibleQuizzes.forEach(qid => {
+      const map = quizMaps[qid];
+      const rec = scores[qid];
+      if (!map || !rec) return;
+      (map.questions || []).forEach(q => {
+        const raw = rec[q.id];
+        if (raw === undefined || raw === null || String(raw).trim() === "") return;
+        const sc = quizQuestionScore(q, raw);
+        const max = q.max || 1;
+        if (sc != null && sc < max * 0.5) {
+          items.push({ ...q, quizId: qid, score: sc, max });
+        }
+      });
+    });
+    return items;
+  }, [visibleQuizzes, quizMaps, scores]);
+
+  useEffect(() => {
+    if (!chartRef.current || typeof Chart === "undefined") return;
+    if (chartInst.current) { try { chartInst.current.destroy(); } catch(e) {} chartInst.current = null; }
+    const labels = rows.map(r => r.qid);
+    const dataPct = rows.map(r => r.pct == null ? null : Math.round(r.pct * 10) / 10);
+    const avgLine = avgPct == null ? null : Math.round(avgPct * 10) / 10;
+    chartInst.current = new Chart(chartRef.current, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "得分率 %",
+            data: dataPct,
+            backgroundColor: dataPct.map(v => v == null ? "#e2e8f0" : v < 40 ? "#f87171" : v < 60 ? "#fbbf24" : "#34d399"),
+            borderRadius: 6,
+          },
+          ...(avgLine != null ? [{
+            label: `平均 ${avgLine}%`,
+            data: labels.map(() => avgLine),
+            type: "line",
+            borderColor: "#6366f1",
+            borderWidth: 2,
+            pointRadius: 0,
+            borderDash: [6, 4],
+          }] : []),
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { position: "top" } },
+        scales: {
+          y: { min: 0, max: 100, title: { display: true, text: "得分率 %" } }
+        }
+      }
+    });
+    return () => { if (chartInst.current) { try { chartInst.current.destroy(); } catch(e) {} } };
+  }, [rows, avgPct]);
+
+  const student = activeStudents.find(s => s.id === sid);
+
+  const buildPrompt = () => {
+    const weakList = weakItems.slice(0, 20).map(q => formatWeakItem(q, `小測 ${q.quizId}，得分 ${q.score}/${q.max}`)).join("\n")
+      || rows.filter(r => r.pct != null && r.pct < 60).map(r => `- 小測 ${r.qid} ${r.title}（得分率 ${Math.round(r.pct)}%）`).join("\n")
+      || "- （暫無弱項，可按近期小測範圍出鞏固題）";
+    const topicIds = weakItems.map(q => q.topicId).filter(Boolean);
+    const syllabus = getSyllabusTableText(topicIds);
+    const tasks = [];
+    if (aiExtra.practice) tasks.push(`A. 針對性練習：${aiMc} 題 MC + ${aiLq} 題 LQ，難度「${aiLevel}」。每題標明 topicId。`);
+    if (aiExtra.explainImg) tasks.push(`B. 解說圖描述：每弱項 1 張概念圖文字描述，註明 topicId。`);
+    if (aiExtra.ppt) tasks.push(`C. PPT 大綱 8–12 頁，標明 topicId。`);
+    if (aiExtra.notes) tasks.push(`D. 溫習筆記：定義→公式→易錯點→例題。`);
+    if (!tasks.length) tasks.push(`A. 練習卷 ${aiMc} MC + ${aiLq} LQ。`);
+    const scoreSummary = rows.filter(r => r.total != null).map(r => `- ${r.qid} ${r.title}: ${r.total}/${r.max}（${Math.round(r.pct)}%）`).join("\n") || "- 尚無成績";
+    return `【身份】你是香港 DSE 物理科老師。
+
+【任務】為學生 ${student ? `${student.class}-${student.num} ${student.name}` : sid} 生成個人化補底材料。
+
+【各小測表現】
+${scoreSummary}
+【個人平均得分率】${avgPct == null ? "—" : avgPct.toFixed(1) + "%"}
+
+【個人弱點】（含 topicId）
+${weakList}
+
+【課程大綱參考】
+${syllabus}
+
+【產出要求】
+${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
+
+【其他】繁體中文；對應 topicId；直接給內容。`;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl border p-4 flex flex-wrap gap-3 items-center">
+        <h2 className="font-bold text-lg">個人分析／表現圖表</h2>
+        <select className="border rounded-lg px-3 py-1.5 text-sm font-semibold min-w-[200px]" value={sid} onChange={e=>setSid(e.target.value)}>
+          {activeStudents.map(s => <option key={s.id} value={s.id}>{s.class}-{s.num} {s.name}</option>)}
+        </select>
+        {loading && <span className="text-xs text-slate-400">載入該生成績…</span>}
+        {avgPct != null && <span className="text-sm font-bold text-indigo-700">平均得分率 {avgPct.toFixed(1)}%</span>}
+      </div>
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
+          <div className="text-sm font-bold text-slate-600 mb-2">各小測得分率（柱狀）與個人平均（虛線）</div>
+          <div className="h-72 relative">
+            <canvas ref={chartRef}></canvas>
+          </div>
+        </div>
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-4 overflow-auto max-h-80">
+          <div className="text-sm font-bold text-slate-600 mb-2">分數一覽</div>
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-50 sticky top-0">
+              <tr>
+                <th className="text-left px-2 py-1">小測</th>
+                <th className="text-center px-2 py-1">分數</th>
+                <th className="text-center px-2 py-1">得分率</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.qid} className="border-t">
+                  <td className="px-2 py-1"><span className="font-bold mono">{r.qid}</span> <span className="text-slate-500">{r.title}</span></td>
+                  <td className="px-2 py-1 text-center font-bold">{r.total == null ? "—" : `${r.total}/${r.max}`}</td>
+                  <td className={`px-2 py-1 text-center font-bold ${r.pct==null?"text-slate-400":r.pct<40?"text-rose-600":r.pct<60?"text-amber-600":"text-emerald-600"}`}>
+                    {r.pct == null ? "—" : Math.round(r.pct) + "%"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="rounded-2xl border-2 border-violet-300 bg-violet-50 p-5 space-y-4">
+        <div className="font-black text-violet-900 text-lg">個人補底 AI Prompt</div>
+        <p className="text-sm text-violet-800">根據該生弱點（含 topicId）+ 課程大綱生成練習／PPT／圖／筆記。</p>
+        <div className="grid sm:grid-cols-3 gap-3">
+          <label className="text-sm font-bold">難度
+            <select className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
+              <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
+            </select>
+          </label>
+          <label className="text-sm font-bold">MC
+            <input type="number" className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
+          </label>
+          <label className="text-sm font-bold">LQ
+            <input type="number" className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          {[
+            ["practice","弱項練習"],
+            ["explainImg","解說圖描述"],
+            ["ppt","PPT 大綱"],
+            ["notes","筆記"],
+          ].map(([k,lab])=>(
+            <label key={k} className={`flex items-center gap-2 px-4 py-2 rounded-xl border-2 text-sm font-bold cursor-pointer ${aiExtra[k]?"border-violet-500 bg-white":"border-slate-200 bg-white/50"}`}>
+              <input type="checkbox" className="w-4 h-4" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} /> {lab}
+            </label>
+          ))}
+        </div>
+        <button className="bg-violet-600 text-white font-black px-6 py-3 rounded-xl"
+          onClick={() => navigator.clipboard.writeText(buildPrompt()).then(()=>alert("已複製")).catch(()=>alert("失敗"))}>
+          複製個人補底 Prompt
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = useState("import");
   const [students, setStudents] = useState([]);
@@ -2223,7 +2666,9 @@ function App() {
         {view==="hwGrade" && <HwGradeView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
         {view==="hwSummary" && <HwSummaryView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
         {view==="hwChase" && <HwChaseView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
-        {view==="quizInput" && <QuizInputAnalysisView activeStudents={activeStudents} quizMaps={quizMaps} quizScores={quizScores} setQuizScores={setQuizScores} />}
+        {view==="quizInput" && <QuizInputAnalysisView activeStudents={activeStudents} quizMaps={quizMaps} quizScores={quizScores} setQuizScores={setQuizScores} currentCohort={cohort} />}
+        {view==="quizStudent" && <QuizStudentAnalysisView activeStudents={activeStudents} quizMaps={quizMaps} currentCohort={cohort} />}
+        {view==="quizSettings" && <QuizSettingsView students={students} quizMaps={quizMaps} setQuizMaps={setQuizMaps} currentCohort={cohort} />}
       </main>
     </div>
   );
