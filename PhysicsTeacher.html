@@ -63,8 +63,8 @@ async function loadHomeworkMaps() {
 }
 
 async function loadHomeworkScores(studentIds) {
+  // 兼容：全量載入（少用）；正式改用 loadHomeworkScoresForHw
   const out = {};
-  // sequential batches to avoid flooding
   for (const sid of studentIds) {
     out[sid] = {};
     try {
@@ -73,6 +73,38 @@ async function loadHomeworkScores(studentIds) {
     } catch(e) { console.warn(sid, e); }
   }
   return out;
+}
+
+/** 懶載入：只讀某一份功課的成績（每位學生 1 次 get） */
+async function loadHomeworkScoresForHw(studentIds, hwId) {
+  const out = {};
+  const chunk = 20;
+  for (let i = 0; i < studentIds.length; i += chunk) {
+    const slice = studentIds.slice(i, i + chunk);
+    await Promise.all(slice.map(async sid => {
+      try {
+        const snap = await db.collection("scores").doc(sid).collection("homeworks").doc(String(hwId)).get();
+        if (snap.exists) {
+          if (!out[sid]) out[sid] = {};
+          out[sid][hwId] = snap.data();
+        }
+      } catch(e) { console.warn(sid, hwId, e); }
+    }));
+  }
+  return out;
+}
+
+/** 懶載入：多份功課（總表／追欠交用） */
+async function loadHomeworkScoresForHws(studentIds, hwIds) {
+  const merged = {};
+  for (const hwId of hwIds) {
+    const part = await loadHomeworkScoresForHw(studentIds, hwId);
+    Object.keys(part).forEach(sid => {
+      if (!merged[sid]) merged[sid] = {};
+      Object.assign(merged[sid], part[sid]);
+    });
+  }
+  return merged;
 }
 
 async function loadQuizMaps() {
@@ -92,6 +124,37 @@ async function loadQuizScores(studentIds) {
     } catch(e) { console.warn(sid, e); }
   }
   return out;
+}
+
+/** 懶載入：只讀某一份小測 */
+async function loadQuizScoresForQuiz(studentIds, quizId) {
+  const out = {};
+  const chunk = 20;
+  for (let i = 0; i < studentIds.length; i += chunk) {
+    const slice = studentIds.slice(i, i + chunk);
+    await Promise.all(slice.map(async sid => {
+      try {
+        const snap = await db.collection("scores").doc(sid).collection("quizzes").doc(String(quizId)).get();
+        if (snap.exists) {
+          if (!out[sid]) out[sid] = {};
+          out[sid][quizId] = snap.data();
+        }
+      } catch(e) { console.warn(sid, quizId, e); }
+    }));
+  }
+  return out;
+}
+
+async function loadQuizMakeup(quizId) {
+  const snap = await db.collection("quizMakeup").doc(String(quizId)).get();
+  return snap.exists ? (snap.data().students || {}) : {};
+}
+
+async function saveQuizMakeup(quizId, studentsMap) {
+  await db.collection("quizMakeup").doc(String(quizId)).set({
+    students: studentsMap,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
 }
 
 async function saveQuizScore(studentId, quizId, record) {
@@ -624,6 +687,30 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
     if (availableHws.length && !availableHws.includes(selectedHw)) setSelectedHw(availableHws[0]||"");
   },[availableHws]);
 
+  // 懶載入：只拉目前選中功課的成績
+  const [hwLoading, setHwLoading] = useState(false);
+  useEffect(() => {
+    if (!selectedHw || !activeStudents.length) return;
+    let cancelled = false;
+    (async () => {
+      setHwLoading(true);
+      try {
+        const part = await loadHomeworkScoresForHw(activeStudents.map(s=>s.id), selectedHw);
+        if (cancelled) return;
+        setHomeworkScores(prev => {
+          const next = { ...prev };
+          activeStudents.forEach(s => {
+            next[s.id] = { ...(next[s.id]||{}) };
+            if (part[s.id] && part[s.id][selectedHw]) next[s.id][selectedHw] = part[s.id][selectedHw];
+          });
+          return next;
+        });
+      } catch(e) { console.warn(e); }
+      if (!cancelled) setHwLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedHw, activeStudents.map(s=>s.id).join(",")]);
+
   // After React re-render, apply pending focus (fixes auto-jump lost on setState)
   useEffect(() => {
     const qid = pendingFocusRef.current;
@@ -816,6 +903,7 @@ ${tasks.map((t,i)=>`${i+1}. ${t}`).join("\n")}
         <select className="w-full border rounded-lg px-2 py-2 text-sm font-bold" value={selectedHw} onChange={e=>{setSelectedHw(e.target.value); setSelectedStudentId(""); setEdit(null);}}>
           {availableHws.map(id=><option key={id} value={id}>{id} — {homeworkMaps[id].title}</option>)}
         </select>
+        {hwLoading && <div className="text-[11px] text-slate-400">載入此功課成績中…</div>}
         <div className="flex flex-wrap gap-1">
           {["ALL","MISSING","PENDING","DONE","PERFECT","EXEMPT"].map(f=>(
             <button key={f} onClick={()=>setFilter(f)} className={`text-[10px] font-bold px-2 py-1 rounded-full border ${filter===f?"bg-indigo-600 text-white border-indigo-600":"bg-white text-slate-600"}`}>
@@ -1027,9 +1115,30 @@ function HwSummaryView({ activeStudents, homeworkMaps, homeworkScores, setHomewo
   const [included, setIncluded] = useState({});
   const [editMode, setEditMode] = useState(false);
   const [saveStatus, setSaveStatus] = useState("idle");
+  const [sumLoading, setSumLoading] = useState(false);
   useEffect(() => {
     const o={}; availableHws.forEach(h=>o[h]=true); setIncluded(o);
   }, [availableHws.join("|")]);
+  useEffect(() => {
+    if (!availableHws.length || !activeStudents.length) return;
+    let cancelled = false;
+    (async () => {
+      setSumLoading(true);
+      try {
+        const part = await loadHomeworkScoresForHws(activeStudents.map(s=>s.id), availableHws);
+        if (cancelled) return;
+        setHomeworkScores(prev => {
+          const next = { ...prev };
+          Object.keys(part).forEach(sid => {
+            next[sid] = { ...(next[sid]||{}), ...part[sid] };
+          });
+          return next;
+        });
+      } catch(e) { console.warn(e); }
+      if (!cancelled) setSumLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [availableHws.join("|"), activeStudents.map(s=>s.id).join(",")]);
 
   const hwMax = useMemo(() => {
     const m={};
@@ -1163,6 +1272,24 @@ function HwChaseView({ activeStudents, homeworkMaps, homeworkScores, setHomework
   const availableHws = useMemo(() => Object.keys(homeworkMaps||{}).filter(id => !homeworkMaps[id].cohort || homeworkMaps[id].cohort===currentCohort).sort(), [homeworkMaps, currentCohort]);
   const [typeFilter, setTypeFilter] = useState("BOTH");
   const [expanded, setExpanded] = useState(null);
+  useEffect(() => {
+    if (!availableHws.length || !activeStudents.length) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const part = await loadHomeworkScoresForHws(activeStudents.map(s=>s.id), availableHws);
+        if (cancelled) return;
+        setHomeworkScores(prev => {
+          const next = { ...prev };
+          Object.keys(part).forEach(sid => {
+            next[sid] = { ...(next[sid]||{}), ...part[sid] };
+          });
+          return next;
+        });
+      } catch(e) { console.warn(e); }
+    })();
+    return () => { cancelled = true; };
+  }, [availableHws.join("|"), activeStudents.map(s=>s.id).join(",")]);
 
   const byStudent = useMemo(() => {
     const map = {};
@@ -1279,6 +1406,13 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
   const [selectedQuiz, setSelectedQuiz] = useState(quizIds[0] || "");
   const [selectedStudentId, setSelectedStudentId] = useState("");
   const [saveStatus, setSaveStatus] = useState("idle");
+  const [qzLoading, setQzLoading] = useState(false);
+  const [makeup, setMakeup] = useState({}); // sid -> { category, status, remark }
+  const [makeupSel, setMakeupSel] = useState([]);
+  const [mkMc, setMkMc] = useState(10);
+  const [mkLq, setMkLq] = useState(0);
+  const [mkLevel, setMkLevel] = useState("中");
+  const [makeupSaving, setMakeupSaving] = useState(false);
   const inputRefs = useRef({});
   const scoresRef = useRef(quizScores);
   const timer = useRef(null);
@@ -1286,6 +1420,33 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
   useEffect(() => {
     if (quizIds.length && !quizIds.includes(selectedQuiz)) setSelectedQuiz(quizIds[0] || "");
   }, [quizIds]);
+
+  // 懶載入：只拉目前小測成績 + 補測記錄
+  useEffect(() => {
+    if (!selectedQuiz || !activeStudents.length) return;
+    let cancelled = false;
+    (async () => {
+      setQzLoading(true);
+      try {
+        const part = await loadQuizScoresForQuiz(activeStudents.map(s => s.id), selectedQuiz);
+        const mk = await loadQuizMakeup(selectedQuiz);
+        if (cancelled) return;
+        setQuizScores(prev => {
+          const next = { ...prev };
+          activeStudents.forEach(s => {
+            next[s.id] = { ...(next[s.id] || {}) };
+            if (part[s.id] && part[s.id][selectedQuiz]) next[s.id][selectedQuiz] = part[s.id][selectedQuiz];
+            else if (next[s.id]) delete next[s.id][selectedQuiz];
+          });
+          return next;
+        });
+        setMakeup(mk || {});
+        setMakeupSel([]);
+      } catch (e) { console.warn(e); }
+      if (!cancelled) setQzLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedQuiz, activeStudents.map(s => s.id).join(",")]);
 
   const map = quizMaps[selectedQuiz];
   const qList = map?.questions || [];
@@ -1372,6 +1533,109 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
         return next;
       });
     } catch (e) { alert(e.message); }
+  };
+
+  const FAIL_RATIO = 0.5;
+
+  const isAbsent = (sid) => {
+    const rec = quizScores[sid]?.[selectedQuiz];
+    if (!rec || typeof rec !== "object") return true;
+    return !qList.some(q => {
+      const v = rec[q.id];
+      return v !== undefined && v !== null && String(v).trim() !== "";
+    });
+  };
+
+  const isFail = (sid) => {
+    if (isAbsent(sid)) return false;
+    const ana = calcStudentTotal(sid);
+    if (!ana || !ana.max) return false;
+    return ana.total / ana.max < FAIL_RATIO;
+  };
+
+  // 建議補測名單：無測 + 不合格（可與手動 makeup 合併顯示）
+  const suggestedMakeup = useMemo(() => {
+    const list = [];
+    activeStudents.forEach(s => {
+      if (isAbsent(s.id)) list.push({ student: s, category: "ABSENT" });
+      else if (isFail(s.id)) list.push({ student: s, category: "FAIL" });
+    });
+    return list;
+  }, [activeStudents, quizScores, selectedQuiz, qList]);
+
+  const ensureMakeupEntry = (sid, category) => {
+    setMakeup(prev => {
+      if (prev[sid]) return prev;
+      return { ...prev, [sid]: { category, status: "PENDING", remark: "" } };
+    });
+  };
+
+  const persistMakeup = async (nextMap) => {
+    setMakeupSaving(true);
+    try {
+      await saveQuizMakeup(selectedQuiz, nextMap);
+      setMakeup(nextMap);
+    } catch (e) { alert(e.message); }
+    setMakeupSaving(false);
+  };
+
+  const updateMakeupField = (sid, patch) => {
+    const next = { ...makeup, [sid]: { category: "ABSENT", status: "PENDING", remark: "", ...(makeup[sid] || {}), ...patch } };
+    setMakeup(next);
+    // debounce write
+    if (window.__mkTimer) clearTimeout(window.__mkTimer);
+    window.__mkTimer = setTimeout(() => persistMakeup(next), 500);
+  };
+
+  const addSuggestedToMakeup = () => {
+    const next = { ...makeup };
+    suggestedMakeup.forEach(({ student: s, category }) => {
+      if (!next[s.id]) next[s.id] = { category, status: "PENDING", remark: "" };
+      else next[s.id] = { ...next[s.id], category: next[s.id].category || category };
+    });
+    persistMakeup(next);
+  };
+
+  const buildMakeupPrompt = () => {
+    const ids = makeupSel.length ? makeupSel : Object.keys(makeup);
+    const lines = ids.map(sid => {
+      const s = activeStudents.find(x => x.id === sid);
+      const m = makeup[sid] || {};
+      const ana = calcStudentTotal(sid);
+      const cat = m.category === "FAIL" ? "不合格" : "無測／缺席";
+      const score = ana ? `${ana.total}/${ana.max}` : "無成績";
+      return `- ${s ? `${s.class}-${s.num} ${s.name}` : sid}（${cat}，成績 ${score}；備註：${m.remark || "無"}）`;
+    }).join("\n") || "- （未選學生）";
+
+    const weakFromClass = (classStats && classStats.processed)
+      ? classStats.processed.filter(q => q.pct < 60 && q.attempts > 0).slice(0, 8)
+          .map(q => `- ${q.id}: ${q.desc || q.topicId}（全班 ${Math.round(q.pct)}%）`).join("\n")
+      : "- （暫無全班數據，請按小測範圍出題）";
+
+    return `【身份】你是香港 DSE 物理科老師。
+
+【任務】為以下「補測」學生設計一份【互動式小測驗】，必須在 AI 的 **Canvas（畫布）模式** 中生成，讓學生可在對話中逐題作答、即時回饋。
+
+【小測範圍】${map?.title || selectedQuiz}
+
+【補測學生】
+${lines}
+
+【可參考的全班弱項】
+${weakFromClass}
+
+【基本設定】
+- 語言：繁體中文
+- 難度：${mkLevel}
+- 多項選擇題 (MC)：${mkMc} 題（預設 10）
+- 長題目 (LQ)：${mkLq} 題
+- ★ 必須強調：以「互動式小測驗」形式、在 **Canvas** 中呈現（逐題顯示、學生作答後再給對錯與簡短解說）
+
+【要求】
+1. 題目貼近原小測課題與常見失分點，由淺入深。
+2. MC 附 4 選項；答錯時指出迷思。
+3. 不要一次公開全部答案；先出題，待學生回答再評。
+4. 開頭用一句話說明這是補測練習，語氣鼓勵。`;
   };
 
   // class analysis for selected quiz
@@ -1463,6 +1727,7 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             onChange={e => { setSelectedQuiz(e.target.value); setSelectedStudentId(""); }}>
             {quizIds.map(id => <option key={id} value={id}>{id} — {quizMaps[id].title || id}</option>)}
           </select>
+          {qzLoading && <div className="text-[11px] text-slate-400">載入此小測成績中…</div>}
           <div className="max-h-[60vh] overflow-auto space-y-1">
             {activeStudents.map(s => {
               const ana = calcStudentTotal(s.id);
@@ -1537,6 +1802,136 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
               </div>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* 補測管理 */}
+      <div className="bg-white rounded-2xl border p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="font-bold text-lg">補測管理 · {selectedQuiz}</h3>
+            <p className="text-xs text-slate-500">兩類：無測過（缺席／未入分）、不合格（&lt;50%）。可記錄是否完成與備註。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {qzLoading && <span className="text-xs text-slate-400">載入中…</span>}
+            <button className="text-xs font-bold px-3 py-1.5 rounded-lg bg-slate-100 border" onClick={addSuggestedToMakeup}>
+              加入建議名單（無測+不合格）
+            </button>
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-3 text-sm">
+          <div className="border rounded-xl p-3 bg-slate-50">
+            <div className="font-bold text-slate-600 text-xs mb-2">系統偵測 · 無測過（{suggestedMakeup.filter(x=>x.category==="ABSENT").length}）</div>
+            <div className="max-h-28 overflow-auto space-y-1">
+              {suggestedMakeup.filter(x=>x.category==="ABSENT").map(({student:s}) => (
+                <div key={s.id} className="flex justify-between text-xs">
+                  <span>{s.class}-{s.num} {s.name}</span>
+                  <button className="text-indigo-600 font-bold" onClick={()=>ensureMakeupEntry(s.id,"ABSENT")}>加入補測</button>
+                </div>
+              ))}
+              {!suggestedMakeup.some(x=>x.category==="ABSENT") && <span className="text-slate-400 text-xs">無</span>}
+            </div>
+          </div>
+          <div className="border rounded-xl p-3 bg-rose-50/50">
+            <div className="font-bold text-rose-700 text-xs mb-2">系統偵測 · 不合格（{suggestedMakeup.filter(x=>x.category==="FAIL").length}）</div>
+            <div className="max-h-28 overflow-auto space-y-1">
+              {suggestedMakeup.filter(x=>x.category==="FAIL").map(({student:s}) => (
+                <div key={s.id} className="flex justify-between text-xs">
+                  <span>{s.class}-{s.num} {s.name} <span className="text-rose-600 font-bold">{(() => { const a=calcStudentTotal(s.id); return a?`${a.total}/${a.max}`:""; })()}</span></span>
+                  <button className="text-indigo-600 font-bold" onClick={()=>ensureMakeupEntry(s.id,"FAIL")}>加入補測</button>
+                </div>
+              ))}
+              {!suggestedMakeup.some(x=>x.category==="FAIL") && <span className="text-slate-400 text-xs">無</span>}
+            </div>
+          </div>
+        </div>
+
+        <div className="overflow-auto max-h-64 border rounded-xl">
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-50 sticky top-0">
+              <tr>
+                <th className="px-2 py-2 text-left">選</th>
+                <th className="px-2 py-2 text-left">學生</th>
+                <th className="px-2 py-2 text-center">類別</th>
+                <th className="px-2 py-2 text-center">狀態</th>
+                <th className="px-2 py-2 text-left">備註</th>
+                <th className="px-2 py-2 text-center">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.keys(makeup).length === 0 && (
+                <tr><td colSpan={6} className="px-2 py-6 text-center text-slate-400">尚未加入補測學生。可按「加入建議名單」或從上方偵測列表加入。</td></tr>
+              )}
+              {Object.keys(makeup).map(sid => {
+                const s = activeStudents.find(x => x.id === sid);
+                const m = makeup[sid] || {};
+                return (
+                  <tr key={sid} className="border-t">
+                    <td className="px-2 py-1">
+                      <input type="checkbox" checked={makeupSel.includes(sid)}
+                        onChange={() => setMakeupSel(prev => prev.includes(sid) ? prev.filter(x=>x!==sid) : [...prev, sid])} />
+                    </td>
+                    <td className="px-2 py-1 font-semibold">{s ? `${s.class}-${s.num} ${s.name}` : sid}</td>
+                    <td className="px-2 py-1 text-center">
+                      <select className="border rounded text-[11px] font-bold" value={m.category || "ABSENT"}
+                        onChange={e => updateMakeupField(sid, { category: e.target.value })}>
+                        <option value="ABSENT">無測過</option>
+                        <option value="FAIL">不合格</option>
+                      </select>
+                    </td>
+                    <td className="px-2 py-1 text-center">
+                      <select className={`border rounded text-[11px] font-bold ${m.status==="DONE"?"bg-emerald-50 text-emerald-700":"bg-amber-50 text-amber-800"}`}
+                        value={m.status || "PENDING"}
+                        onChange={e => updateMakeupField(sid, { status: e.target.value })}>
+                        <option value="PENDING">未完成</option>
+                        <option value="DONE">已完成</option>
+                      </select>
+                    </td>
+                    <td className="px-2 py-1">
+                      <input className="w-full border rounded px-2 py-1 text-[11px]" placeholder="例：只完成 Q1–2，放學再來"
+                        value={m.remark || ""}
+                        onChange={e => updateMakeupField(sid, { remark: e.target.value })} />
+                    </td>
+                    <td className="px-2 py-1 text-center">
+                      <button className="text-rose-600 font-bold" onClick={() => {
+                        const next = { ...makeup }; delete next[sid];
+                        persistMakeup(next);
+                        setMakeupSel(prev => prev.filter(x => x !== sid));
+                      }}>移除</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {makeupSaving && <div className="text-[11px] text-slate-400">補測記錄儲存中…</div>}
+
+        <div className="border-t pt-3 space-y-2">
+          <div className="text-xs font-bold text-slate-600">補測 AI Prompt（針對勾選學生；未勾選則用表上全部）</div>
+          <div className="grid sm:grid-cols-3 gap-2">
+            <label className="text-xs font-bold text-slate-500">難度
+              <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={mkLevel} onChange={e=>setMkLevel(e.target.value)}>
+                <option value="淺">淺</option>
+                <option value="中">中</option>
+                <option value="深">深</option>
+              </select>
+            </label>
+            <label className="text-xs font-bold text-slate-500">MC（預設 10）
+              <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={mkMc} onChange={e=>setMkMc(parseInt(e.target.value)||0)} />
+            </label>
+            <label className="text-xs font-bold text-slate-500">LQ
+              <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={mkLq} onChange={e=>setMkLq(parseInt(e.target.value)||0)} />
+            </label>
+          </div>
+          <p className="text-[11px] text-violet-700 bg-violet-50 border border-violet-100 rounded-lg px-2 py-1.5">
+            Prompt 會要求在 <b>Canvas</b> 以<strong>互動式小測驗</strong>形式生成（逐題作答、即時回饋）。
+          </p>
+          <button className="bg-violet-600 hover:bg-violet-700 text-white font-bold px-4 py-2 rounded-lg text-sm"
+            onClick={() => navigator.clipboard.writeText(buildMakeupPrompt()).then(()=>alert("已複製補測 Prompt")).catch(()=>alert("複製失敗"))}>
+            複製補測 AI Prompt（{makeupSel.length || Object.keys(makeup).length} 人）
+          </button>
         </div>
       </div>
 
@@ -1703,12 +2098,11 @@ function App() {
       setStudents(stu);
       const maps = await loadHomeworkMaps();
       setHomeworkMaps(maps);
-      const scores = await loadHomeworkScores(stu.map(s=>s.id));
-      setHomeworkScores(scores);
       const qmaps = await loadQuizMaps();
       setQuizMaps(qmaps);
-      const qscores = await loadQuizScores(stu.map(s=>s.id));
-      setQuizScores(qscores);
+      // 懶載入：成績不在開頁時全拉，進入各區／選卷時才讀
+      setHomeworkScores({});
+      setQuizScores({});
     } catch(e) { alert("載入失敗："+e.message); }
     setLoading(false);
   }, []);
