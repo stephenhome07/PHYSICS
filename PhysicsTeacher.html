@@ -277,6 +277,18 @@ async function deleteExamScore(studentId, examId) {
   await db.collection("scores").doc(studentId).collection("exams").doc(String(examId)).delete();
 }
 
+async function loadExamMakeup(examId) {
+  const snap = await db.collection("examMakeup").doc(String(examId)).get();
+  return snap.exists ? (snap.data().students || {}) : {};
+}
+
+async function saveExamMakeup(examId, studentsMap) {
+  await db.collection("examMakeup").doc(String(examId)).set({
+    students: studentsMap,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+
 /** 考試是否適用該群組：無 cohort = 全組通用 */
 function examVisibleForCohort(map, cohort) {
   return quizVisibleForCohort(map, cohort);
