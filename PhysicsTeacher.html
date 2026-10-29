@@ -1580,6 +1580,8 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
   const [mkLq, setMkLq] = useState(0);
   const [mkLevel, setMkLevel] = useState("中");
   const [makeupSaving, setMakeupSaving] = useState(false);
+  // Prompt 用：從已納入補底課題中再選子集（可唔一次出晒）
+  const [promptTopicIds, setPromptTopicIds] = useState([]);
   const inputRefs = useRef({});
   const scoresRef = useRef(quizScores);
   const timer = useRef(null);
@@ -3059,6 +3061,15 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
   const activeIdsKey = useMemo(() => activeStudents.map(s => s.id).join(","), [activeStudents]);
   const [loadInfo, setLoadInfo] = useState("");
 
+  // 切換補考學生時：Prompt 預設勾「已納入且未完成」的課題
+  useEffect(() => {
+    if (!makeupFocus || !makeup[makeupFocus]) { setPromptTopicIds([]); return; }
+    const topics = makeup[makeupFocus].topics || {};
+    const pending = Object.keys(topics).filter(tid => !topics[tid]?.done);
+    setPromptTopicIds(pending.length ? pending : Object.keys(topics));
+  }, [makeupFocus]);
+
+
   useEffect(() => {
     if (!selectedExam || !activeStudents.length) return;
     let cancelled = false;
@@ -3745,24 +3756,46 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
               });
 
               const buildMakeupPrompt = () => {
-                const selected = topicIds.filter(id => topics[id]);
-                const lines = selected.map(id => {
+                const selected = (promptTopicIds.length ? promptTopicIds : topicIds).filter(id => topics[id]);
+                // 該生在此考試中、對應已選 topic 的失分／弱項題
+                const rec = examScores[sid]?.[selectedExam] || {};
+                const weakQLines = [];
+                qList.forEach(q => {
+                  if (!selected.includes(q.topicId)) return;
+                  const raw = rec[q.id];
+                  if (raw === undefined || raw === null || String(raw).trim() === "") {
+                    weakQLines.push(`- [${q.id}] topicId: ${q.topicId || "（無）"}｜${q.topicDesc || ""}｜未作答`);
+                    return;
+                  }
+                  const sc = quizQuestionScore(q, raw);
+                  const max = q.max || 1;
+                  if (sc == null) return;
+                  if (sc < max * 0.6) {
+                    const ansPart = q.type === "MC" ? `，學生答 ${String(raw).toUpperCase()}${q.ans ? "（正解 "+q.ans+"）" : ""}` : `，得分 ${sc}/${max}`;
+                    weakQLines.push(`- [${q.id}] topicId: ${q.topicId || "（無）"}｜${q.topicDesc || ""}${ansPart}`);
+                  }
+                });
+                const topicLines = selected.map(id => {
                   const info = SYLLABUS_TOPICS[id];
                   const name = typeof info === "object" && info ? (info.topic || info.name || "") : (info || "");
-                  const tt = topics[id];
-                  return `- topicId: ${id}｜${name || tt.label || ""}｜掌握約 ${tt.pct != null ? tt.pct + "%" : "—"}｜${tt.done ? "已完成" : "待補"}`;
-                }).join("\n") || "- （請先勾選難點）";
+                  const desc = typeof info === "object" && info ? (info.desc || "") : "";
+                  const tt = topics[id] || {};
+                  return `- topicId: ${id}｜課題：${name || tt.label || ""}｜掌握約 ${tt.pct != null ? tt.pct + "%" : "—"}｜${tt.done ? "已完成" : "待補"}${desc ? "\n  學習要求：" + desc : ""}`;
+                }).join("\n") || "- （請先在下方 Prompt 課題中勾選）";
                 const syllabus = getSyllabusTableText(selected);
                 return `【身份】你是香港 DSE 物理科老師。
 
 【任務】為補考學生 ${s ? `${s.class}-${s.num} ${s.name}` : sid} 生成【互動式小測驗】，必須在 AI **Canvas** 模式中逐題作答、即時回饋。
 
-【考試】${map?.title || selectedExam}
+【考試】${map?.title || selectedExam}（${selectedExam}）
 【學生成績】${st ? `卷面 ${st.total}/${st.max}，加權 ${st.weighted.toFixed(1)}` : "無測／缺席"}
 【備註】${m.remark || "無"}
 
-【要補的難點】（含 topicId）
-${lines}
+【本次 Prompt 要針對的課題】（從補底清單中再選，含 topicId）
+${topicLines}
+
+【該生在此考試中的相關弱項題】（題號、描述、作答情況）
+${weakQLines.length ? weakQLines.join("\n") : "- （所選課題下未找到明顯失分題，請按課題概念出鞏固題）"}
 
 【課程大綱參考】
 ${syllabus}
@@ -3772,7 +3805,11 @@ ${syllabus}
 - MC：${mkMc} 題；LQ：${mkLq} 題
 - ★ Canvas 互動式：先出題，待學生回答再評；勿一次公開全部答案
 
-【要求】每題標明 topicId；針對上列難點；開頭一句鼓勵。`;
+【要求】
+1. 緊扣上列弱項題與 topicId，由淺入深。
+2. 每題標明 topicId；MC 附 4 選項，答錯指出迷思。
+3. 不要一次公開全部答案。
+4. 開頭一句鼓勵。`;
               };
 
               return (
@@ -3836,8 +3873,32 @@ ${syllabus}
                     )}
                   </div>
 
-                  <div className="rounded-xl border border-violet-200 bg-violet-50 p-3 space-y-2">
+                  <div className="rounded-xl border border-violet-200 bg-violet-50 p-3 space-y-3">
                     <div className="font-bold text-violet-900 text-sm">個人專屬 Prompt 出題（Canvas 互動）</div>
+                    <p className="text-[11px] text-violet-800">進度分母仍用上方「納入」課題。此處再選<strong>今次 Prompt 要出題的課題</strong>（可只選其中幾項）。</p>
+                    {!topicIds.length ? (
+                      <p className="text-xs text-slate-400">請先在上方勾選納入補底課題</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {topicIds.map(tid => {
+                          const on = promptTopicIds.includes(tid);
+                          const tt = topics[tid] || {};
+                          return (
+                            <label key={tid} className={`text-[11px] font-bold px-2 py-1 rounded-lg border-2 cursor-pointer ${on?"border-violet-500 bg-white text-violet-900":"border-slate-200 bg-white/50 text-slate-500"}`}>
+                              <input type="checkbox" className="mr-1" checked={on}
+                                onChange={() => setPromptTopicIds(prev => prev.includes(tid) ? prev.filter(x=>x!==tid) : [...prev, tid])} />
+                              <span className="mono">{tid}</span>
+                              {tt.done ? " ✓" : ""}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <div className="flex gap-2 text-[11px]">
+                      <button type="button" className="font-bold text-violet-700" onClick={() => setPromptTopicIds(topicIds.slice())}>全選納入課題</button>
+                      <button type="button" className="font-bold text-slate-500" onClick={() => setPromptTopicIds(topicIds.filter(id => !topics[id]?.done))}>只選未完成</button>
+                      <button type="button" className="font-bold text-slate-400" onClick={() => setPromptTopicIds([])}>清空</button>
+                    </div>
                     <div className="grid grid-cols-3 gap-2">
                       <label className="text-xs font-bold">難度
                         <select className="mt-0.5 w-full border rounded px-1 py-1" value={mkLevel} onChange={e=>setMkLevel(e.target.value)}>
@@ -3852,8 +3913,12 @@ ${syllabus}
                       </label>
                     </div>
                     <button className="bg-violet-600 text-white font-bold text-sm px-4 py-2 rounded-lg"
-                      onClick={() => navigator.clipboard.writeText(buildMakeupPrompt()).then(()=>alert("已複製補考 Prompt")).catch(()=>alert("失敗"))}>
-                      複製此生補考 Prompt
+                      onClick={() => {
+                        if (!promptTopicIds.length && !topicIds.length) return alert("請先納入並勾選 Prompt 課題");
+                        if (!promptTopicIds.length) return alert("請勾選今次 Prompt 要針對的課題");
+                        navigator.clipboard.writeText(buildMakeupPrompt()).then(()=>alert("已複製補考 Prompt（"+promptTopicIds.length+" 個課題）")).catch(()=>alert("失敗"));
+                      }}>
+                      複製此生補考 Prompt（{promptTopicIds.length || 0} 課題）
                     </button>
                   </div>
                 </div>
