@@ -406,6 +406,7 @@ function Sidebar({ view, setView }) {
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">考試</div>
         <Item id="examInput" label="考試成績輸入及分析" />
+        <Item id="examSummary" label="考試分數表" />
         <Item id="examSettings" label="考試內容設定" />
       </div>
     </aside>
@@ -3932,6 +3933,203 @@ ${syllabus}
   );
 }
 
+
+function ExamSummaryView({ activeStudents, examMaps, currentCohort }) {
+  const available = useMemo(
+    () => Object.keys(examMaps || {}).filter(id => examVisibleForCohort(examMaps[id], currentCohort)).sort(),
+    [examMaps, currentCohort]
+  );
+  const [included, setIncluded] = useState({});
+  const [scores, setScores] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setIncluded(prev => {
+      const next = {};
+      available.forEach(id => { next[id] = prev[id] !== undefined ? prev[id] : true; });
+      return next;
+    });
+  }, [available.join("|")]);
+
+  const selectedIds = useMemo(() => available.filter(id => included[id]), [available, included]);
+
+  useEffect(() => {
+    if (!activeStudents.length || !selectedIds.length) {
+      setScores({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const merged = {};
+        activeStudents.forEach(s => { merged[s.id] = {}; });
+        for (const eid of selectedIds) {
+          const part = await loadExamScoresForExam(activeStudents.map(s => s.id), eid);
+          if (part.__meta) delete part.__meta;
+          Object.keys(part).forEach(sid => {
+            if (!merged[sid]) merged[sid] = {};
+            Object.assign(merged[sid], part[sid] || {});
+          });
+        }
+        if (!cancelled) setScores(merged);
+      } catch (e) { console.warn(e); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedIds.join("|"), activeStudents.map(s => s.id).join(",")]);
+
+  const examMeta = useMemo(() => {
+    const m = {};
+    available.forEach(id => {
+      const qs = examMaps[id]?.questions || [];
+      let totalMax = 0, mcMax = 0, lqMax = 0;
+      qs.forEach(q => {
+        const max = q.max || 0;
+        totalMax += max;
+        if (q.type === "MC") mcMax += max; else lqMax += max;
+      });
+      m[id] = { totalMax, mcMax, lqMax, questions: qs };
+    });
+    return m;
+  }, [available, examMaps]);
+
+  const scoreOf = (sid, eid) => {
+    const rec = scores[sid]?.[eid];
+    const meta = examMeta[eid];
+    if (!rec || !meta) return null;
+    let any = false, total = 0, mcScore = 0, lqScore = 0;
+    meta.questions.forEach(q => {
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      any = true;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      total += sc;
+      if (q.type === "MC") mcScore += sc; else lqScore += sc;
+    });
+    if (!any) return null;
+    let weighted = 0;
+    if (meta.mcMax > 0 && meta.lqMax > 0) weighted = (mcScore / meta.mcMax) * 35 + (lqScore / meta.lqMax) * 65;
+    else if (meta.mcMax > 0) weighted = (mcScore / meta.mcMax) * 100;
+    else if (meta.lqMax > 0) weighted = (lqScore / meta.lqMax) * 100;
+    return { total, max: meta.totalMax, weighted };
+  };
+
+  const rows = useMemo(() => {
+    return activeStudents.map(s => {
+      const qs = {};
+      let sumW = 0, n = 0;
+      selectedIds.forEach(eid => {
+        const sc = scoreOf(s.id, eid);
+        qs[eid] = sc;
+        if (sc) { sumW += sc.weighted; n++; }
+      });
+      return { ...s, examScores: qs, average: n > 0 ? sumW / n : null };
+    });
+  }, [activeStudents, selectedIds, scores, examMeta]);
+
+  const exportExcel = () => {
+    const header = ["班別", "號", "姓名", "學生ID",
+      ...selectedIds.map(id => id + "分數"),
+      ...selectedIds.map(id => id + "加權"),
+      "平均加權"];
+    const maxRow = ["", "", "滿分", "",
+      ...selectedIds.map(id => examMeta[id]?.totalMax || 0),
+      ...selectedIds.map(() => "100"),
+      "100"];
+    const body = rows.map(s => {
+      const scoreCols = selectedIds.map(id => s.examScores[id] == null ? "" : s.examScores[id].total);
+      const wCols = selectedIds.map(id => s.examScores[id] == null ? "" : s.examScores[id].weighted.toFixed(1));
+      return [s.class, s.num, s.name, s.id, ...scoreCols, ...wCols, s.average == null ? "" : s.average.toFixed(1)];
+    });
+    const csv = [header, maxRow, ...body].map(r => r.map(c => {
+      const x = String(c ?? "");
+      return /[",\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x;
+    }).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "exam_summary.csv";
+    a.click();
+  };
+
+  const cellCls = (sc) => {
+    if (!sc) return "";
+    if (sc.weighted < 40) return "bg-rose-50 text-rose-700";
+    if (sc.weighted < 60) return "bg-amber-50 text-amber-800";
+    return "";
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="font-bold text-lg">考試分數表</h2>
+          <p className="text-xs text-slate-500">勾選要顯示的考試；顯示卷面分／加權（MC35%+LQ65%）。懶載入僅讀勾選卷。</p>
+        </div>
+        <div className="flex gap-2 items-center">
+          {loading && <span className="text-xs text-slate-400">載入中…</span>}
+          <button className="text-sm font-bold px-4 py-2 rounded-lg bg-emerald-600 text-white" onClick={exportExcel}>匯出 Excel (CSV)</button>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {available.map(id => (
+          <label key={id} className={`text-sm font-bold flex items-center gap-1.5 border-2 rounded-lg px-3 py-1.5 cursor-pointer ${included[id]?"border-purple-400 bg-purple-50":"border-slate-200"}`}>
+            <input type="checkbox" checked={!!included[id]} onChange={() => setIncluded(p => ({ ...p, [id]: !p[id] }))} />
+            {id}
+            <span className="text-xs font-normal text-slate-400">/{examMeta[id]?.totalMax}</span>
+          </label>
+        ))}
+        {!available.length && <span className="text-slate-400 text-sm">此群組尚無考試藍圖</span>}
+      </div>
+      <div className="overflow-auto max-h-[70vh]">
+        <table className="min-w-full text-sm">
+          <thead className="sticky top-0 bg-slate-50">
+            <tr>
+              <th className="text-left px-2 py-2">班</th>
+              <th className="text-left px-2 py-2">號</th>
+              <th className="text-left px-2 py-2">姓名</th>
+              {selectedIds.map(id => (
+                <th key={id} className="text-center px-2 py-2 text-xs">
+                  {id}
+                  <div className="text-[10px] font-normal text-slate-400">卷面 / 加權</div>
+                </th>
+              ))}
+              <th className="text-center px-2 py-2 text-xs">平均加權</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(s => (
+              <tr key={s.id} className="border-t">
+                <td className="px-2 py-1">{s.class}</td>
+                <td className="px-2 py-1">{s.num}</td>
+                <td className="px-2 py-1 font-semibold">{s.name}</td>
+                {selectedIds.map(id => {
+                  const sc = s.examScores[id];
+                  return (
+                    <td key={id} className={`px-2 py-1 text-center font-bold ${cellCls(sc)}`}>
+                      {sc == null ? "—" : (
+                        <span>
+                          {sc.total}/{sc.max}
+                          <span className="block text-[10px] font-semibold text-purple-700">{sc.weighted.toFixed(1)}</span>
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+                <td className={`px-2 py-1 text-center font-bold ${s.average != null && s.average < 40 ? "text-rose-600" : s.average != null && s.average < 60 ? "text-amber-600" : "text-slate-800"}`}>
+                  {s.average == null ? "—" : s.average.toFixed(1)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ExamSettingsView({ students, examMaps, setExamMaps, currentCohort }) {
   const cohorts = useMemo(() => Array.from(new Set(students.map(s => s.cohort).filter(Boolean))).sort(), [students]);
   const [selectedCohort, setSelectedCohort] = useState(currentCohort && currentCohort !== "所有學生" ? currentCohort : (cohorts[0] || ""));
@@ -4225,6 +4423,7 @@ function App() {
         {view==="quizSummary" && <QuizSummaryView activeStudents={activeStudents} quizMaps={quizMaps} currentCohort={cohort} />}
         {view==="quizSettings" && <QuizSettingsView students={students} quizMaps={quizMaps} setQuizMaps={setQuizMaps} currentCohort={cohort} />}
         {view==="examInput" && <ExamInputAnalysisView activeStudents={activeStudents} examMaps={examMaps} examScores={examScores} setExamScores={setExamScores} currentCohort={cohort} />}
+        {view==="examSummary" && <ExamSummaryView activeStudents={activeStudents} examMaps={examMaps} currentCohort={cohort} />}
         {view==="examSettings" && <ExamSettingsView students={students} examMaps={examMaps} setExamMaps={setExamMaps} currentCohort={cohort} />}
       </main>
     </div>
