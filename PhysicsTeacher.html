@@ -222,6 +222,26 @@ async function deleteQuizMap(quizId) {
   await db.collection("quizMaps").doc(String(quizId)).delete();
 }
 
+async function loadExamMaps() {
+  const snap = await db.collection("examMaps").get();
+  const maps = {};
+  snap.forEach(d => { maps[d.id] = { ...d.data(), _id: d.id }; });
+  return maps;
+}
+
+async function saveExamMap(examId, data) {
+  await db.collection("examMaps").doc(String(examId)).set({ ...data, updatedAt: new Date().toISOString() }, { merge: true });
+}
+
+async function deleteExamMap(examId) {
+  await db.collection("examMaps").doc(String(examId)).delete();
+}
+
+/** 考試是否適用該群組：無 cohort = 全組通用 */
+function examVisibleForCohort(map, cohort) {
+  return quizVisibleForCohort(map, cohort);
+}
+
 /** 小測是否適用於該群組：無 cohort = 全組通用 */
 function quizVisibleForCohort(map, cohort) {
   if (!map) return false;
@@ -330,6 +350,10 @@ function Sidebar({ view, setView }) {
         <Item id="quizStudent" label="個人分析／表現圖表" />
         <Item id="quizSummary" label="小測分數表" />
         <Item id="quizSettings" label="小測內容設定" />
+      </div>
+      <div>
+        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">考試</div>
+        <Item id="examSettings" label="考試內容設定" />
       </div>
     </aside>
   );
@@ -2946,6 +2970,240 @@ function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
   );
 }
 
+
+function ExamSettingsView({ students, examMaps, setExamMaps, currentCohort }) {
+  const cohorts = useMemo(() => Array.from(new Set(students.map(s => s.cohort).filter(Boolean))).sort(), [students]);
+  const [selectedCohort, setSelectedCohort] = useState(currentCohort && currentCohort !== "所有學生" ? currentCohort : (cohorts[0] || ""));
+  const [examId, setExamId] = useState("");
+  const [examTitle, setExamTitle] = useState("");
+  const [pasteData, setPasteData] = useState("");
+  const [editingOriginalId, setEditingOriginalId] = useState(null);
+  const [assignCohort, setAssignCohort] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (currentCohort && currentCohort !== "所有學生") setSelectedCohort(currentCohort);
+  }, [currentCohort]);
+
+  const listIds = useMemo(() => Object.keys(examMaps || {}).sort(), [examMaps]);
+
+  const parseLines = (text) => {
+    return text.trim().split("\n").map(line => {
+      const clean = line.trim(); if (!clean) return null;
+      let cols = clean.split("\t").map(c => c.trim());
+      // 支援 9 欄整表：考試編號 標題 題號 題型 滿分 難度 topicId 描述 答案
+      if (cols.length >= 8 && cols[0] && cols[2] && (cols[1] || "").length > 0) {
+        // 可能是整表列
+        const maybeType = (cols[3] || "").toUpperCase();
+        if (maybeType === "MC" || maybeType === "LQ") {
+          return {
+            examIdFromRow: cols[0],
+            titleFromRow: cols[1],
+            id: cols[2],
+            type: maybeType,
+            max: parseFloat(cols[4]) || 1,
+            level: (cols[5] || "中").trim(),
+            topicId: (cols[6] || "").trim(),
+            topicDesc: (cols[7] || "").trim(),
+            ans: (cols[8] || "").trim().toUpperCase()
+          };
+        }
+      }
+      if (cols.length < 6) {
+        const multi = clean.split(/\s{2,}/).map(c => c.trim()).filter(Boolean);
+        if (multi.length >= 6) cols = multi;
+      }
+      let maxScore = parseFloat(cols[2]); if (isNaN(maxScore) || maxScore <= 0) maxScore = 1;
+      const type = (cols[1] || "MC").toUpperCase();
+      return {
+        id: (cols[0] || "").trim(),
+        type,
+        max: maxScore,
+        level: (cols[3] || "中").trim(),
+        topicId: (cols[4] || "").trim(),
+        topicDesc: (cols[5] || "").trim(),
+        ans: (cols[6] || "").trim().toUpperCase()
+      };
+    }).filter(q => q && q.id && !String(q.id).includes("題目") && !String(q.id).includes("編號") && !String(q.id).includes("考試"));
+  };
+
+  const loadEdit = (id) => {
+    const m = examMaps[id];
+    if (!m) return;
+    setEditingOriginalId(id);
+    setExamId(id);
+    setExamTitle(m.title || "");
+    setAssignCohort(m.cohort || "");
+    let text = "";
+    (m.questions || []).forEach(q => {
+      text += `${q.id}\t${q.type}\t${q.max}\t${q.level || "中"}\t${q.topicId || ""}\t${q.topicDesc || ""}\t${q.ans || ""}\n`;
+    });
+    setPasteData(text);
+  };
+
+  const handleSave = async () => {
+    if (!examId.trim() || !examTitle.trim()) return alert("請填寫考試編號與標題");
+    const parsed = parseLines(pasteData);
+    if (!parsed.length) return alert("無法解析題目");
+    // 若貼上含考試編號的 9 欄，只取題目欄
+    const questions = parsed.map(q => ({
+      id: q.id,
+      type: q.type,
+      max: q.max,
+      level: q.level,
+      topicId: q.topicId,
+      topicDesc: q.topicDesc,
+      ans: q.ans || ""
+    }));
+    let cohortVal = assignCohort;
+    if (cohortVal === "所有學生") cohortVal = "";
+    setBusy(true);
+    try {
+      const newId = examId.trim();
+      const oldId = editingOriginalId;
+      const data = { title: examTitle.trim(), questions, cohort: cohortVal || "" };
+      await saveExamMap(newId, data);
+      const next = { ...examMaps, [newId]: { ...data, _id: newId } };
+      if (oldId && oldId !== newId) {
+        await deleteExamMap(oldId);
+        delete next[oldId];
+        // 遷移成績 exams 子集合
+        const stuSnap = await db.collection("students").get();
+        for (const d of stuSnap.docs) {
+          const ref = db.collection("scores").doc(d.id).collection("exams").doc(oldId);
+          const snap = await ref.get();
+          if (snap.exists) {
+            await db.collection("scores").doc(d.id).collection("exams").doc(newId).set(snap.data(), { merge: true });
+            await ref.delete();
+          }
+        }
+      }
+      setExamMaps(next);
+      setEditingOriginalId(newId);
+      alert("已儲存考試藍圖" + (data.cohort ? `（群組：${data.cohort}）` : "（所有群組通用）"));
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm(`確定刪除考試藍圖「${id}」？`)) return;
+    setBusy(true);
+    try {
+      await deleteExamMap(id);
+      const next = { ...examMaps };
+      delete next[id];
+      setExamMaps(next);
+      if (editingOriginalId === id) {
+        setEditingOriginalId(null); setExamId(""); setExamTitle(""); setPasteData(""); setAssignCohort("");
+      }
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const saveCohortOnly = async (id, cohort) => {
+    const m = examMaps[id];
+    if (!m) return;
+    const c = cohort === "所有學生" ? "" : cohort;
+    try {
+      await saveExamMap(id, { ...m, cohort: c });
+      setExamMaps(prev => ({ ...prev, [id]: { ...m, cohort: c } }));
+    } catch (e) { alert(e.message); }
+  };
+
+  const buildExamCsvPrompt = () => {
+    const syllabus = getSyllabusTableText();
+    return `【身份】你是香港 DSE 物理科老師／出題助手。
+
+【任務】我會上傳一份考試卷（PDF／Word／圖片）。請為每一小題產出 Tab 分隔列。
+
+【課程大綱參考】（topicId 必須從下列課題編號選用）
+${syllabus}
+
+【輸出欄位】
+考試編號 [Tab] 考試標題 [Tab] 題目ID [Tab] 題型 [Tab] 滿分 [Tab] 難度 [Tab] 課題編號 [Tab] 題目描述 [Tab] 正確答案
+
+【規則】
+1. 題號：MC1、MC2…／LQ1a、LQ1bi…
+2. 題型：MC 或 LQ；難度：淺／中／深
+3. topicId 必須用上方大綱編號；topicDesc 20–30 字
+4. MC 答案 A/B/C/D；LQ 答案留空
+5. 只輸出資料行（可含表頭），不要 Markdown`;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-4 space-y-3">
+          <h2 className="font-bold text-lg text-purple-800">考試列表</h2>
+          <p className="text-sm text-slate-600">無群組 = 所有群組可見。可為舊考試補上群組。</p>
+          <div className="max-h-[65vh] overflow-auto space-y-2">
+            {listIds.map(id => {
+              const m = examMaps[id];
+              return (
+                <div key={id} className={`border rounded-xl p-3 ${editingOriginalId===id?"border-purple-400 bg-purple-50":"border-slate-200"}`}>
+                  <button className="w-full text-left" onClick={() => loadEdit(id)}>
+                    <div className="font-bold text-base mono text-purple-700">{id}</div>
+                    <div className="text-sm font-semibold text-slate-800 truncate">{m.title}</div>
+                    <div className="text-sm text-slate-500 mt-0.5">{(m.questions||[]).length} 題 · {m.cohort ? `群組 ${m.cohort}` : "所有群組通用"}</div>
+                  </button>
+                  <div className="mt-2 flex gap-2 items-center">
+                    <select className="text-sm border rounded-lg flex-1 py-1.5 px-2 font-semibold" value={m.cohort || "所有學生"}
+                      onChange={e => saveCohortOnly(id, e.target.value)}>
+                      <option value="所有學生">所有群組</option>
+                      {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <button className="text-sm text-rose-600 font-bold px-2" onClick={() => handleDelete(id)}>刪除</button>
+                  </div>
+                </div>
+              );
+            })}
+            {!listIds.length && <p className="text-slate-400 text-sm">尚無考試，請右側新增或匯入 Sheet（examMaps）。</p>}
+          </div>
+        </div>
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-5 space-y-4">
+          <h2 className="font-bold text-lg">{editingOriginalId ? `編輯：${editingOriginalId}` : "新增考試"}</h2>
+          <div className="grid sm:grid-cols-2 gap-3">
+            <label className="text-sm font-bold text-slate-600">考試編號
+              <input className="mt-1 w-full border-2 rounded-lg px-3 py-2 text-sm font-bold" value={examId} onChange={e=>setExamId(e.target.value)} placeholder="如 MOCK2025" />
+            </label>
+            <label className="text-sm font-bold text-slate-600">標題
+              <input className="mt-1 w-full border-2 rounded-lg px-3 py-2 text-sm" value={examTitle} onChange={e=>setExamTitle(e.target.value)} />
+            </label>
+            <label className="text-sm font-bold text-slate-600">所屬群組
+              <select className="mt-1 w-full border-2 rounded-lg px-3 py-2 text-sm" value={assignCohort || "所有學生"} onChange={e=>setAssignCohort(e.target.value === "所有學生" ? "" : e.target.value)}>
+                <option value="所有學生">所有群組通用</option>
+                {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+            <div className="text-sm text-slate-500 flex items-end pb-2">新建建議選「{selectedCohort || "—"}」</div>
+          </div>
+          <label className="text-sm font-bold text-slate-600 block">題目（Tab：題號 題型 滿分 難度 topicId 描述 [答案]）
+            <textarea className="mt-1 w-full border-2 rounded-xl p-3 text-sm mono h-52" value={pasteData} onChange={e=>setPasteData(e.target.value)}
+              placeholder={"MC1\tMC\t1\t中\t2.6.1\t計算功\tA\nLQ1a\tLQ\t2\t淺\t2.6.2\t計算勢能\t"} />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button disabled={busy} className="bg-purple-600 text-white font-bold px-5 py-2.5 rounded-xl text-sm disabled:opacity-50" onClick={handleSave}>
+              {busy ? "儲存中…" : "儲存到 Firebase"}
+            </button>
+            <button className="border-2 font-bold px-5 py-2.5 rounded-xl text-sm" onClick={() => {
+              setEditingOriginalId(null); setExamId(""); setExamTitle(""); setPasteData("");
+              setAssignCohort(selectedCohort || "");
+            }}>清空／新增</button>
+          </div>
+        </div>
+      </div>
+      <div className="rounded-2xl border-2 border-violet-300 bg-violet-50 p-5 space-y-3">
+        <div className="font-black text-violet-900 text-lg">AI Prompt · 生成考試藍圖表格</div>
+        <p className="text-sm text-violet-800">上傳試卷後生成含 <b>topicId</b> 的 Tab 表格（已附課程大綱）。</p>
+        <button className="bg-violet-600 hover:bg-violet-700 text-white font-black px-6 py-3 rounded-xl text-base"
+          onClick={() => navigator.clipboard.writeText(buildExamCsvPrompt()).then(()=>alert("已複製")).catch(()=>alert("失敗"))}>
+          複製 AI Prompt（含 Syllabus / Topic ID）
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = useState("import");
   const [students, setStudents] = useState([]);
@@ -2953,6 +3211,7 @@ function App() {
   const [homeworkScores, setHomeworkScores] = useState({});
   const [quizMaps, setQuizMaps] = useState({});
   const [quizScores, setQuizScores] = useState({});
+  const [examMaps, setExamMaps] = useState({});
   const [loading, setLoading] = useState(true);
   const [cohort, setCohort] = useState("所有學生");
 
@@ -2965,6 +3224,8 @@ function App() {
       setHomeworkMaps(maps);
       const qmaps = await loadQuizMaps();
       setQuizMaps(qmaps);
+      const emaps = await loadExamMaps();
+      setExamMaps(emaps);
       await loadSyllabus();
       setHomeworkScores({});
       setQuizScores({});
@@ -3000,6 +3261,7 @@ function App() {
         {view==="quizStudent" && <QuizStudentAnalysisView activeStudents={activeStudents} quizMaps={quizMaps} currentCohort={cohort} />}
         {view==="quizSummary" && <QuizSummaryView activeStudents={activeStudents} quizMaps={quizMaps} currentCohort={cohort} />}
         {view==="quizSettings" && <QuizSettingsView students={students} quizMaps={quizMaps} setQuizMaps={setQuizMaps} currentCohort={cohort} />}
+        {view==="examSettings" && <ExamSettingsView students={students} examMaps={examMaps} setExamMaps={setExamMaps} currentCohort={cohort} />}
       </main>
     </div>
   );
