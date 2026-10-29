@@ -1580,8 +1580,6 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
   const [mkLq, setMkLq] = useState(0);
   const [mkLevel, setMkLevel] = useState("中");
   const [makeupSaving, setMakeupSaving] = useState(false);
-  // Prompt 用：從已納入補底課題中再選子集（可唔一次出晒）
-  const [promptTopicIds, setPromptTopicIds] = useState([]);
   const inputRefs = useRef({});
   const scoresRef = useRef(quizScores);
   const timer = useRef(null);
@@ -3047,6 +3045,8 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
   const [mkLq, setMkLq] = useState(0);
   const [mkLevel, setMkLevel] = useState("中");
   const [makeupSaving, setMakeupSaving] = useState(false);
+  // Prompt 用：從已納入補底課題中再選子集
+  const [promptTopicIds, setPromptTopicIds] = useState([]);
 
   const [aiMc, setAiMc] = useState(5);
   const [aiLq, setAiLq] = useState(3);
