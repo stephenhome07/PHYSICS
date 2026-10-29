@@ -3473,8 +3473,33 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                         <td className="px-2 py-1.5 text-center">
                           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${q.badgeColor}`}>{q.diag}</span>
                         </td>
-                        <td className="px-2 py-1.5 text-[10px] text-slate-500">
-                          {q.type === "MC" ? `A${q.counts.A} B${q.counts.B} C${q.counts.C} D${q.counts.D}` : "—"}
+                        <td className="px-2 py-1.5 min-w-[180px]">
+                          {q.type !== "MC" ? <span className="text-slate-400">—</span> : (() => {
+                            const total = Math.max(1, (q.counts.A||0)+(q.counts.B||0)+(q.counts.C||0)+(q.counts.D||0)+(q.counts.Other||0));
+                            const ansSet = (q.ans||"").toString().toUpperCase().split(",").map(a=>a.trim()).filter(Boolean);
+                            const colors = { A: "bg-sky-500", B: "bg-violet-500", C: "bg-amber-500", D: "bg-rose-400" };
+                            return (
+                              <div className="space-y-1 py-0.5">
+                                {["A","B","C","D"].map(opt => {
+                                  const n = q.counts[opt] || 0;
+                                  const pct = Math.round((n / total) * 100);
+                                  const isAns = ansSet.includes(opt);
+                                  return (
+                                    <div key={opt} className="flex items-center gap-1.5">
+                                      <span className={`w-4 text-[11px] font-black ${isAns ? "text-emerald-600" : "text-slate-600"}`}>{opt}</span>
+                                      <div className="flex-1 h-3 rounded-md bg-slate-100 overflow-hidden border border-slate-200">
+                                        <div className={`h-full ${isAns ? "bg-emerald-500" : colors[opt]}`} style={{width: Math.max(pct, n>0?4:0)+"%"}} title={n+" 人"} />
+                                      </div>
+                                      <span className={`text-[11px] font-bold w-12 text-right tabular-nums ${isAns?"text-emerald-700":"text-slate-700"}`}>{n}<span className="text-slate-400 font-normal">({pct}%)</span></span>
+                                    </div>
+                                  );
+                                })}
+                                {ansSet.length > 0 && (
+                                  <div className="text-[10px] text-emerald-700 font-bold">✓ 答案 {ansSet.join("/")}</div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
                       </tr>
                     );
@@ -3528,35 +3553,26 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
 
       {/* 補考專區 */}
       <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <div className="flex flex-wrap justify-between gap-2 items-center">
+        <div className="flex flex-wrap justify-between gap-3 items-start">
           <div>
             <h3 className="font-bold text-lg text-purple-900">補考專區 · {selectedExam}</h3>
-            <p className="text-xs text-slate-500">加入目標同學 → 勾選要補的難點（topicId）→ 標記完成。進度 100% 才算完成。</p>
+            <p className="text-xs text-slate-500">可手動加入任何學生，或一鍵加入建議名單。勾選難點 → 標完成；進度 100% 才算完成。</p>
           </div>
-          <button className="text-sm font-black px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white shadow border-2 border-amber-600"
-            onClick={() => {
-              const next = { ...makeup };
-              activeStudents.forEach(s => {
-                const st = calcStudent(s.id);
-                if (!st) {
-                  if (!next[s.id]) next[s.id] = { category: "ABSENT", remark: "", topics: {} };
-                } else if (st.weighted < 50) {
-                  if (!next[s.id]) next[s.id] = { category: "FAIL", remark: "", topics: {} };
-                }
-              });
-              // 為新加入者預填弱項 topic
-              Object.keys(next).forEach(sid => {
-                if (!next[sid].topics) next[sid].topics = {};
+          <div className="flex flex-wrap gap-2 items-center">
+            <select id="exam-makeup-add" className="border-2 rounded-lg px-2 py-2 text-sm font-semibold min-w-[160px]"
+              defaultValue=""
+              onChange={e => {
+                const sid = e.target.value;
+                e.target.value = "";
+                if (!sid || makeup[sid]) return;
+                const st = calcStudent(sid);
+                const entry = { category: !st ? "ABSENT" : (st.weighted < 50 ? "FAIL" : "MANUAL"), remark: "", topics: {} };
                 const rec = examScores[sid]?.[selectedExam] || {};
                 const topicBag = {};
                 qList.forEach(q => {
-                  const raw = rec[q.id];
                   if (!q.topicId) return;
-                  if (raw === undefined || raw === null || String(raw).trim() === "") {
-                    if (!topicBag[q.topicId]) topicBag[q.topicId] = { score: 0, max: 0 };
-                    // skip empty for fail students with partial - still mark weak if scored low
-                    return;
-                  }
+                  const raw = rec[q.id];
+                  if (raw === undefined || raw === null || String(raw).trim() === "") return;
                   const sc = quizQuestionScore(q, raw);
                   if (sc == null) return;
                   if (!topicBag[q.topicId]) topicBag[q.topicId] = { score: 0, max: 0, desc: q.topicDesc || "" };
@@ -3566,23 +3582,67 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                 });
                 Object.entries(topicBag).forEach(([tid, v]) => {
                   const pct = v.max > 0 ? (v.score / v.max) * 100 : 0;
-                  if (pct < 60 && !next[sid].topics[tid]) {
-                    next[sid].topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct) };
-                  }
+                  if (pct < 60) entry.topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct) };
                 });
-                // 無測：用全班弱 topic
-                if (next[sid].category === "ABSENT" && !Object.keys(next[sid].topics).length) {
+                if (!Object.keys(entry.topics).length) {
                   qStats.filter(q => q.pct != null && q.pct < 50 && q.topicId).forEach(q => {
-                    if (!next[sid].topics[q.topicId]) {
-                      next[sid].topics[q.topicId] = { done: false, label: q.topicDesc || q.topicId, pct: Math.round(q.pct) };
-                    }
+                    if (!entry.topics[q.topicId]) entry.topics[q.topicId] = { done: false, label: q.topicDesc || q.topicId, pct: Math.round(q.pct) };
                   });
                 }
-              });
-              persistExamMakeup(next);
-            }}>
-            ＋ 加入建議名單（無測 + 不合格&lt;50%）
-          </button>
+                const next = { ...makeup, [sid]: entry };
+                persistExamMakeup(next);
+                setMakeupFocus(sid);
+              }}>
+              <option value="">＋ 手動加入學生…</option>
+              {activeStudents.filter(s => !makeup[s.id]).map(s => (
+                <option key={s.id} value={s.id}>{s.class}-{s.num} {s.name}</option>
+              ))}
+            </select>
+            <button className="text-sm font-black px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white shadow border-2 border-amber-600"
+              onClick={() => {
+                const next = { ...makeup };
+                activeStudents.forEach(s => {
+                  const st = calcStudent(s.id);
+                  if (!st) {
+                    if (!next[s.id]) next[s.id] = { category: "ABSENT", remark: "", topics: {} };
+                  } else if (st.weighted < 50) {
+                    if (!next[s.id]) next[s.id] = { category: "FAIL", remark: "", topics: {} };
+                  }
+                });
+                Object.keys(next).forEach(sid => {
+                  if (!next[sid].topics) next[sid].topics = {};
+                  const rec = examScores[sid]?.[selectedExam] || {};
+                  const topicBag = {};
+                  qList.forEach(q => {
+                    const raw = rec[q.id];
+                    if (!q.topicId) return;
+                    if (raw === undefined || raw === null || String(raw).trim() === "") return;
+                    const sc = quizQuestionScore(q, raw);
+                    if (sc == null) return;
+                    if (!topicBag[q.topicId]) topicBag[q.topicId] = { score: 0, max: 0, desc: q.topicDesc || "" };
+                    topicBag[q.topicId].score += sc;
+                    topicBag[q.topicId].max += (q.max || 1);
+                    topicBag[q.topicId].desc = q.topicDesc || topicBag[q.topicId].desc || "";
+                  });
+                  Object.entries(topicBag).forEach(([tid, v]) => {
+                    const pct = v.max > 0 ? (v.score / v.max) * 100 : 0;
+                    if (pct < 60 && !next[sid].topics[tid]) {
+                      next[sid].topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct) };
+                    }
+                  });
+                  if (next[sid].category === "ABSENT" && !Object.keys(next[sid].topics).length) {
+                    qStats.filter(q => q.pct != null && q.pct < 50 && q.topicId).forEach(q => {
+                      if (!next[sid].topics[q.topicId]) {
+                        next[sid].topics[q.topicId] = { done: false, label: q.topicDesc || q.topicId, pct: Math.round(q.pct) };
+                      }
+                    });
+                  }
+                });
+                persistExamMakeup(next);
+              }}>
+              ＋ 加入建議名單（無測 + 不合格&lt;50%）
+            </button>
+          </div>
         </div>
 
         <div className="grid lg:grid-cols-5 gap-4">
