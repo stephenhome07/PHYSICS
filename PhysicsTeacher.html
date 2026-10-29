@@ -239,19 +239,30 @@ async function deleteExamMap(examId) {
 
 async function loadExamScoresForExam(studentIds, examId) {
   const out = {};
-  const chunk = 20;
+  const meta = { found: 0, errors: 0, tried: studentIds.length };
+  const chunk = 15;
   for (let i = 0; i < studentIds.length; i += chunk) {
     const slice = studentIds.slice(i, i + chunk);
     await Promise.all(slice.map(async sid => {
       try {
         const snap = await db.collection("scores").doc(sid).collection("exams").doc(String(examId)).get();
         if (snap.exists) {
+          let data = snap.data() || {};
+          // 相容：若匯入時整份包在 value 內
+          if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
+            data = { ...data.value, updatedAt: data.updatedAt };
+          }
           if (!out[sid]) out[sid] = {};
-          out[sid][examId] = snap.data();
+          out[sid][examId] = data;
+          meta.found++;
         }
-      } catch (e) { console.warn(sid, examId, e); }
+      } catch (e) {
+        meta.errors++;
+        console.warn("loadExamScore", sid, examId, e && e.message);
+      }
     }));
   }
+  out.__meta = meta;
   return out;
 }
 
@@ -3033,31 +3044,52 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
     if (examIds.length && !examIds.includes(selectedExam)) setSelectedExam(examIds[0] || "");
   }, [examIds]);
 
+  const activeIdsKey = useMemo(() => activeStudents.map(s => s.id).join(","), [activeStudents]);
+  const [loadInfo, setLoadInfo] = useState("");
+
   useEffect(() => {
     if (!selectedExam || !activeStudents.length) return;
     let cancelled = false;
     (async () => {
       setLoading(true);
+      setLoadInfo("");
       try {
         const part = await loadExamScoresForExam(activeStudents.map(s => s.id), selectedExam);
-        const mk = await loadExamMakeup(selectedExam);
+        let mk = {};
+        try { mk = await loadExamMakeup(selectedExam); } catch (e) { console.warn("makeup", e); }
         if (cancelled) return;
+        const meta = part.__meta || {};
+        delete part.__meta;
         setExamScores(prev => {
           const next = { ...prev };
-          activeStudents.forEach(s => {
-            next[s.id] = { ...(next[s.id] || {}) };
-            if (part[s.id] && part[s.id][selectedExam]) next[s.id][selectedExam] = part[s.id][selectedExam];
-            else if (next[s.id]) delete next[s.id][selectedExam];
+          // 只寫入「有讀到」的文件；讀不到時保留畫面既有資料，避免一次失敗清空全班
+          Object.keys(part).forEach(sid => {
+            next[sid] = { ...(next[sid] || {}), ...(part[sid] || {}) };
           });
+          // 若成功讀完且確認該生無此卷文件，才清掉（errors==0 時才做「明確沒有」清理）
+          if ((meta.errors || 0) === 0) {
+            activeStudents.forEach(s => {
+              if (!part[s.id] || !part[s.id][selectedExam]) {
+                if (next[s.id] && next[s.id][selectedExam]) {
+                  const copy = { ...next[s.id] };
+                  delete copy[selectedExam];
+                  next[s.id] = copy;
+                }
+              }
+            });
+          }
           return next;
         });
         setMakeup(mk || {});
-        setMakeupFocus("");
-      } catch (e) { console.warn(e); }
+        setLoadInfo(`讀取 ${meta.found || 0}/${meta.tried || 0} 人有此卷成績` + (meta.errors ? `（${meta.errors} 次讀取失敗）` : ""));
+      } catch (e) {
+        console.warn(e);
+        setLoadInfo("讀取失敗：" + (e.message || String(e)));
+      }
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [selectedExam, activeStudents.map(s => s.id).join(",")]);
+  }, [selectedExam, activeIdsKey]);
 
   const map = examMaps[selectedExam];
   const qList = map?.questions || [];
@@ -3065,11 +3097,17 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
   const calcStudent = (sid) => {
     if (!map) return null;
     const rec = examScores[sid]?.[selectedExam] || {};
+    // 建立不區分大小寫的 key 對照
+    const recKeys = {};
+    Object.keys(rec || {}).forEach(k => { if (k !== "updatedAt" && k !== "_id" && k !== "value") recKeys[String(k).toUpperCase()] = rec[k]; });
     let mcScore = 0, mcMax = 0, lqScore = 0, lqMax = 0, any = false;
     qList.forEach(q => {
       const max = q.max || 1;
       if (q.type === "MC") mcMax += max; else lqMax += max;
-      const raw = rec[q.id];
+      let raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") {
+        raw = recKeys[String(q.id).toUpperCase()];
+      }
       if (raw === undefined || raw === null || String(raw).trim() === "") return;
       any = true;
       if (q.type === "MC") {
@@ -3283,6 +3321,7 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             {examIds.map(id => <option key={id} value={id}>{id} — {examMaps[id].title || id}</option>)}
           </select>
           {loading && <div className="text-[11px] text-slate-400">載入此考試成績中…</div>}
+          {!!loadInfo && <div className="text-[11px] text-slate-500">{loadInfo}</div>}
           <div className="max-h-[60vh] overflow-auto space-y-1">
             {activeStudents.map(s => {
               const st = calcStudent(s.id);
