@@ -75,6 +75,48 @@ async function loadHomeworkScores(studentIds) {
   return out;
 }
 
+async function loadQuizMaps() {
+  const snap = await db.collection("quizMaps").get();
+  const maps = {};
+  snap.forEach(d => { maps[d.id] = { ...d.data(), _id: d.id }; });
+  return maps;
+}
+
+async function loadQuizScores(studentIds) {
+  const out = {};
+  for (const sid of studentIds) {
+    out[sid] = {};
+    try {
+      const snap = await db.collection("scores").doc(sid).collection("quizzes").get();
+      snap.forEach(d => { out[sid][d.id] = d.data(); });
+    } catch(e) { console.warn(sid, e); }
+  }
+  return out;
+}
+
+async function saveQuizScore(studentId, quizId, record) {
+  await db.collection("scores").doc(studentId).collection("quizzes").doc(String(quizId)).set({
+    ...record,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+
+async function deleteQuizScore(studentId, quizId) {
+  await db.collection("scores").doc(studentId).collection("quizzes").doc(String(quizId)).delete();
+}
+
+function quizQuestionScore(q, raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+  if (q.type === "MC") {
+    if (!q.ans) return 0;
+    const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+    return corrects.includes(String(raw).trim().toUpperCase()) ? (q.max || 1) : 0;
+  }
+  const n = parseFloat(raw);
+  return isNaN(n) ? 0 : n;
+}
+
+
 async function saveHomeworkMap(hwId, data) {
   await db.collection("homeworkMaps").doc(String(hwId)).set({ ...data, updatedAt: new Date().toISOString() }, { merge: true });
 }
@@ -143,6 +185,10 @@ function Sidebar({ view, setView }) {
         <Item id="hwSettings" label="功課設定" />
         <Item id="hwSummary" label="成績總表與快速編輯" />
         <Item id="hwChase" label="追欠交及改正區" />
+      </div>
+      <div>
+        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">小測</div>
+        <Item id="quizInput" label="小測成績輸入及分析" />
       </div>
     </aside>
   );
@@ -813,37 +859,59 @@ ${tasks.map((t,i)=>`${i+1}. ${t}`).join("\n")}
                     <div className="text-[10px] text-slate-400">{q.type} /{q.max}</div>
                   </div>
                   <div className="flex-1 text-xs text-slate-600 truncate" title={q.topicDesc}>{q.topicId} {q.topicDesc}</div>
-                  {q.type==="MC" ? (
-                    <input
-                      data-hw-qid={q.id}
-                      ref={el => { if (el) inputRefs.current[q.id]=el; }}
-                      className="w-16 border rounded px-2 py-1 text-center font-bold uppercase"
-                      maxLength={4}
-                      value={edit.scores?.[q.id] ?? ""}
-                      onChange={e=>onScoreChange(q, e.target.value)}
-                      onKeyDown={e=>{ if (e.key==="Enter" || e.key==="Tab") { e.preventDefault(); focusNext(q.id); } }}
-                    />
-                  ) : (
-                    <input
-                      data-hw-qid={q.id}
-                      ref={el => { if (el) inputRefs.current[q.id]=el; }}
-                      type="number"
-                      className="w-20 border rounded px-2 py-1 text-center font-bold"
-                      value={edit.scores?.[q.id] ?? ""}
-                      onChange={e=>onScoreChange(q, e.target.value)}
-                      onKeyDown={e=>{
-                        if (e.key==="Enter" || e.key==="Tab") {
-                          e.preventDefault();
-                          focusNext(q.id);
-                        }
-                      }}
-                    />
-                  )}
-                  {q.type==="MC" && q.ans && (
-                    <span className={`text-xs font-bold ${(edit.scores?.[q.id]||"").toString().toUpperCase()===q.ans.toString().toUpperCase()?"text-emerald-600":"text-rose-500"}`}>
-                      答:{q.ans}
-                    </span>
-                  )}
+                  {(() => {
+                    const raw = edit.scores?.[q.id];
+                    const has = raw !== undefined && raw !== null && String(raw).trim() !== "";
+                    let scoreColor = "border-slate-200 bg-white text-slate-800";
+                    if (has) {
+                      if (q.type === "MC") {
+                        const ok = q.ans && String(raw).trim().toUpperCase() === String(q.ans).split(",")[0].trim().toUpperCase()
+                          || (q.ans && q.ans.toString().split(",").map(a=>a.trim().toUpperCase()).includes(String(raw).trim().toUpperCase()));
+                        scoreColor = ok ? "border-emerald-400 bg-emerald-50 text-emerald-800" : "border-rose-400 bg-rose-50 text-rose-700";
+                      } else {
+                        const n = parseFloat(raw);
+                        if (!isNaN(n) && n <= 0) scoreColor = "border-rose-400 bg-rose-50 text-rose-700";
+                        else if (!isNaN(n) && n >= (q.max||0)) scoreColor = "border-emerald-400 bg-emerald-50 text-emerald-800";
+                        else if (has) scoreColor = "border-amber-400 bg-amber-50 text-amber-800";
+                      }
+                    }
+                    return (
+                      <div className="flex items-center gap-1 shrink-0">
+                        {q.type==="MC" ? (
+                          <input
+                            data-hw-qid={q.id}
+                            ref={el => { if (el) inputRefs.current[q.id]=el; }}
+                            className={`w-14 border-2 rounded px-1 py-1 text-center font-bold uppercase ${scoreColor}`}
+                            maxLength={4}
+                            value={raw ?? ""}
+                            onChange={e=>onScoreChange(q, e.target.value)}
+                            onKeyDown={e=>{ if (e.key==="Enter" || e.key==="Tab") { e.preventDefault(); focusNext(q.id); } }}
+                          />
+                        ) : (
+                          <input
+                            data-hw-qid={q.id}
+                            ref={el => { if (el) inputRefs.current[q.id]=el; }}
+                            type="number"
+                            className={`w-16 border-2 rounded px-1 py-1 text-center font-bold ${scoreColor}`}
+                            value={raw ?? ""}
+                            onChange={e=>onScoreChange(q, e.target.value)}
+                            onKeyDown={e=>{
+                              if (e.key==="Enter" || e.key==="Tab") {
+                                e.preventDefault();
+                                focusNext(q.id);
+                              }
+                            }}
+                          />
+                        )}
+                        <span className="text-[11px] font-bold text-slate-400 tabular-nums">/{q.max}</span>
+                        {q.type==="MC" && q.ans && (
+                          <span className={`text-[10px] font-bold ml-0.5 ${has && scoreColor.includes("emerald")?"text-emerald-600":"text-slate-400"}`}>
+                            {q.ans}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -1184,11 +1252,329 @@ function HwChaseView({ activeStudents, homeworkMaps, homeworkScores, setHomework
   );
 }
 
+
+function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizScores }) {
+  const quizIds = useMemo(() => Object.keys(quizMaps || {}).sort(), [quizMaps]);
+  const [selectedQuiz, setSelectedQuiz] = useState(quizIds[0] || "");
+  const [selectedStudentId, setSelectedStudentId] = useState("");
+  const [saveStatus, setSaveStatus] = useState("idle");
+  const inputRefs = useRef({});
+  const scoresRef = useRef(quizScores);
+  const timer = useRef(null);
+  useEffect(() => { scoresRef.current = quizScores; }, [quizScores]);
+  useEffect(() => {
+    if (quizIds.length && !quizIds.includes(selectedQuiz)) setSelectedQuiz(quizIds[0] || "");
+  }, [quizIds]);
+
+  const map = quizMaps[selectedQuiz];
+  const qList = map?.questions || [];
+
+  const studentRec = (sid) => {
+    const r = quizScores[sid]?.[selectedQuiz] || {};
+    // strip meta keys for display
+    return r;
+  };
+
+  const focusNext = (fromQid) => {
+    const idx = qList.findIndex(q => q.id === fromQid);
+    if (idx < 0 || idx >= qList.length - 1) return;
+    const nextId = qList[idx + 1].id;
+    setTimeout(() => {
+      const el = inputRefs.current[nextId] || document.querySelector('[data-qz-qid="'+nextId+'"]');
+      if (el) { el.focus(); if (el.select) el.select(); }
+    }, 40);
+  };
+
+  const scheduleSave = (sid, quizId, record) => {
+    setSaveStatus("saving");
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      try {
+        await saveQuizScore(sid, quizId, record);
+        setSaveStatus("saved");
+        setTimeout(() => setSaveStatus(s => s === "saved" ? "idle" : s), 1500);
+      } catch (e) { setSaveStatus("idle"); alert(e.message); }
+    }, 600);
+  };
+
+  const setQVal = (qid, raw, q) => {
+    if (!selectedStudentId || !selectedQuiz) return;
+    let stored = raw;
+    if (raw === "" || raw === null || raw === undefined) stored = "";
+    else if (q.type === "MC") stored = String(raw).toUpperCase().replace(/[^A-D]/g, "").slice(0, 1);
+    else stored = (raw === "" || isNaN(parseFloat(raw))) ? raw : parseFloat(raw);
+
+    setQuizScores(prev => {
+      const prevRec = { ...(prev[selectedStudentId]?.[selectedQuiz] || {}) };
+      const nextRec = { ...prevRec, [qid]: stored };
+      const next = {
+        ...prev,
+        [selectedStudentId]: {
+          ...(prev[selectedStudentId] || {}),
+          [selectedQuiz]: nextRec
+        }
+      };
+      scheduleSave(selectedStudentId, selectedQuiz, nextRec);
+      return next;
+    });
+    if (stored !== "" && stored !== null) focusNext(qid);
+  };
+
+  const calcStudentTotal = (sid) => {
+    if (!map) return null;
+    const rec = quizScores[sid]?.[selectedQuiz];
+    if (!rec || typeof rec !== "object") return null;
+    let total = 0, max = 0, any = false;
+    qList.forEach(q => {
+      max += (q.max || 0);
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      any = true;
+      const sc = quizQuestionScore(q, raw);
+      if (sc != null) total += sc;
+    });
+    return any ? { total, max } : null;
+  };
+
+  const clearStudent = async () => {
+    if (!selectedStudentId || !selectedQuiz) return;
+    if (!confirm("清除此學生此小測全部成績？")) return;
+    try {
+      await deleteQuizScore(selectedStudentId, selectedQuiz);
+      setQuizScores(prev => {
+        const next = { ...prev };
+        if (next[selectedStudentId]) {
+          const copy = { ...next[selectedStudentId] };
+          delete copy[selectedQuiz];
+          next[selectedStudentId] = copy;
+        }
+        return next;
+      });
+    } catch (e) { alert(e.message); }
+  };
+
+  // class analysis for selected quiz
+  const classStats = useMemo(() => {
+    if (!map || !activeStudents.length) return null;
+    let classTotal = 0, classMax = 0, attempted = 0;
+    const qStats = {};
+    qList.forEach(q => { qStats[q.id] = { id: q.id, type: q.type, max: q.max, total: 0, attempts: 0, desc: q.topicDesc || q.desc || "", topicId: q.topicId || "", level: q.level }; });
+    activeStudents.forEach(st => {
+      const rec = quizScores[st.id]?.[selectedQuiz];
+      if (!rec || typeof rec !== "object") return;
+      const keys = Object.keys(rec).filter(k => !["updatedAt","_id"].includes(k));
+      if (!keys.length) return;
+      attempted++;
+      qList.forEach(q => {
+        const raw = rec[q.id];
+        if (raw === undefined || raw === null || String(raw).trim() === "") return;
+        const val = quizQuestionScore(q, raw);
+        if (val == null) return;
+        classTotal += val;
+        classMax += q.max || 0;
+        qStats[q.id].total += val;
+        qStats[q.id].attempts++;
+      });
+    });
+    if (!attempted) return null;
+    const processed = Object.values(qStats).map(q => ({
+      ...q,
+      pct: q.attempts > 0 ? (q.total / ((q.max || 1) * q.attempts)) * 100 : 0
+    })).sort((a, b) => a.pct - b.pct);
+    return { classTotal, classMax, attempted, processed, avgPct: classMax > 0 ? (classTotal / classMax) * 100 : 0 };
+  }, [map, activeStudents, quizScores, selectedQuiz, qList]);
+
+  const [aiSelected, setAiSelected] = useState([]);
+  useEffect(() => {
+    if (!classStats) { setAiSelected([]); return; }
+    setAiSelected(classStats.processed.filter(q => q.pct < 60 && q.attempts > 0).map(q => q.id));
+  }, [selectedQuiz, classStats && classStats.processed.map(q=>q.id+":"+Math.round(q.pct)).join("|")]);
+
+  const buildClassReviewPrompt = () => {
+    if (!classStats) return "尚無數據";
+    const weakQ = (aiSelected.length ? classStats.processed.filter(q => aiSelected.includes(q.id)) : classStats.processed.filter(q => q.pct < 60))
+      .map(q => `- 題號 ${q.id} (${q.type}): ${q.topicId} ${q.desc}（全班得分率 ${Math.round(q.pct)}%）`).join("\n") || "- （無）";
+    return `【身份】你是香港 DSE 物理科老師。
+
+【任務】全班剛完成小測「${map?.title || selectedQuiz}」。請設計約 15 分鐘試後檢討大綱。
+
+【全班平均得分率】${Math.round(classStats.avgPct)}%（${classStats.attempted} 人已入分）
+
+【弱項題目】
+${weakQ}
+
+【要求】
+1. 針對弱項概念用日常例子重新解說
+2. 點出常見迷思與陷阱
+3. 給 3 條可在堂上即時提問的 Concept Checking Questions
+4. 繁體中文，直接輸出大綱`;
+  };
+
+  if (!quizIds.length) {
+    return <div className="p-8 text-slate-400">尚未有小測藍圖。請先匯入 Sheet 資料（含 quizMaps）。</div>;
+  }
+  if (!map) {
+    return <div className="p-8 text-slate-400">找不到小測資料</div>;
+  }
+
+  const rec = selectedStudentId ? studentRec(selectedStudentId) : {};
+
+  return (
+    <div className="space-y-4">
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-4 space-y-3">
+          <select className="w-full border rounded-lg px-2 py-2 text-sm font-bold" value={selectedQuiz}
+            onChange={e => { setSelectedQuiz(e.target.value); setSelectedStudentId(""); }}>
+            {quizIds.map(id => <option key={id} value={id}>{id} — {quizMaps[id].title || id}</option>)}
+          </select>
+          <div className="max-h-[60vh] overflow-auto space-y-1">
+            {activeStudents.map(s => {
+              const ana = calcStudentTotal(s.id);
+              const fail = ana && ana.max > 0 && ana.total / ana.max < 0.5;
+              return (
+                <button key={s.id} onClick={() => setSelectedStudentId(s.id)}
+                  className={`w-full text-left px-3 py-2 rounded-xl border text-sm flex justify-between ${selectedStudentId===s.id?"border-blue-400 bg-blue-50":"border-slate-100 hover:bg-slate-50"}`}>
+                  <span><b>{s.class}-{s.num}</b> {s.name}</span>
+                  {ana && <span className={`text-xs font-bold ${fail?"text-rose-600":"text-emerald-600"}`}>{ana.total}/{ana.max}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
+          {!selectedStudentId ? (
+            <p className="text-slate-400 p-8 text-center">選擇學生輸入小測成績</p>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap justify-between items-center gap-2">
+                <div className="font-bold">{activeStudents.find(x=>x.id===selectedStudentId)?.name} · {selectedQuiz}</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":""}</span>
+                  <button className="text-xs font-bold text-rose-600" onClick={clearStudent}>清除此卷</button>
+                </div>
+              </div>
+              <div className="space-y-2 max-h-[55vh] overflow-auto">
+                {qList.map(q => {
+                  const raw = rec[q.id];
+                  const has = raw !== undefined && raw !== null && String(raw).trim() !== "";
+                  let scoreColor = "border-slate-200 bg-white";
+                  if (has) {
+                    if (q.type === "MC") {
+                      const ok = q.ans && q.ans.toString().split(",").map(a=>a.trim().toUpperCase()).includes(String(raw).trim().toUpperCase());
+                      scoreColor = ok ? "border-emerald-400 bg-emerald-50 text-emerald-800" : "border-rose-400 bg-rose-50 text-rose-700";
+                    } else {
+                      const n = parseFloat(raw);
+                      if (!isNaN(n) && n <= 0) scoreColor = "border-rose-400 bg-rose-50 text-rose-700";
+                      else if (!isNaN(n) && n >= (q.max||0)) scoreColor = "border-emerald-400 bg-emerald-50 text-emerald-800";
+                      else scoreColor = "border-amber-400 bg-amber-50 text-amber-800";
+                    }
+                  }
+                  return (
+                    <div key={q.id} className="border rounded-xl p-2 flex gap-2 items-center">
+                      <div className="w-20 shrink-0">
+                        <div className="text-xs font-bold mono">{q.id}</div>
+                        <div className="text-[10px] text-slate-400">{q.type}</div>
+                      </div>
+                      <div className="flex-1 text-xs text-slate-600 truncate" title={q.topicDesc||q.desc}>{q.topicId} {q.topicDesc||q.desc}</div>
+                      <div className="flex items-center gap-1">
+                        {q.type === "MC" ? (
+                          <input data-qz-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}}
+                            className={`w-14 border-2 rounded px-1 py-1 text-center font-bold uppercase ${scoreColor}`}
+                            maxLength={1} value={raw ?? ""}
+                            onChange={e=>setQVal(q.id, e.target.value, q)}
+                            onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
+                          />
+                        ) : (
+                          <input data-qz-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}} type="number"
+                            className={`w-16 border-2 rounded px-1 py-1 text-center font-bold ${scoreColor}`}
+                            value={raw ?? ""}
+                            onChange={e=>setQVal(q.id, e.target.value, q)}
+                            onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
+                          />
+                        )}
+                        <span className="text-[11px] font-bold text-slate-400">/{q.max}</span>
+                        {q.type==="MC" && q.ans && <span className="text-[10px] text-slate-400 font-bold">{q.ans}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 整班弱點分析（合併） */}
+      <div className="bg-white rounded-2xl border p-5 space-y-3">
+        <div className="flex flex-wrap justify-between gap-2 items-center">
+          <h3 className="font-bold text-lg">整班弱點分析 · {selectedQuiz}</h3>
+          {classStats && (
+            <span className="text-sm text-slate-500">
+              已入分 {classStats.attempted} 人 · 全班平均 <b className={classStats.avgPct<50?"text-rose-600":"text-emerald-600"}>{Math.round(classStats.avgPct)}%</b>
+            </span>
+          )}
+        </div>
+        {!classStats ? (
+          <p className="text-slate-400 text-sm">尚無足夠成績作分析</p>
+        ) : (
+          <>
+            <div className="overflow-auto max-h-64 border rounded-xl">
+              <table className="min-w-full text-xs">
+                <thead className="bg-slate-50 sticky top-0">
+                  <tr>
+                    <th className="px-2 py-2 text-left">選</th>
+                    <th className="px-2 py-2 text-left">題號</th>
+                    <th className="px-2 py-2 text-left">考點</th>
+                    <th className="px-2 py-2 text-center">作答人數</th>
+                    <th className="px-2 py-2 text-center">得分率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {classStats.processed.map(q => {
+                    const color = q.pct < 40 ? "text-rose-600 font-bold" : q.pct < 60 ? "text-amber-600 font-bold" : "text-emerald-600 font-bold";
+                    return (
+                      <tr key={q.id} className="border-t">
+                        <td className="px-2 py-1">
+                          <input type="checkbox" checked={aiSelected.includes(q.id)}
+                            onChange={() => setAiSelected(prev => prev.includes(q.id) ? prev.filter(x=>x!==q.id) : [...prev, q.id])} />
+                        </td>
+                        <td className="px-2 py-1 mono font-bold">{q.id}</td>
+                        <td className="px-2 py-1 truncate max-w-[260px]">{q.topicId} {q.desc}</td>
+                        <td className="px-2 py-1 text-center">{q.attempts}</td>
+                        <td className={`px-2 py-1 text-center ${color}`}>{q.attempts ? Math.round(q.pct)+"%" : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button className="text-[11px] font-bold px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-100"
+                onClick={() => setAiSelected(classStats.processed.filter(q=>q.pct<60&&q.attempts>0).map(q=>q.id))}>全選弱項(&lt;60%)</button>
+              <button className="text-[11px] font-bold px-2 py-1 rounded bg-slate-100 border"
+                onClick={() => setAiSelected(classStats.processed.map(q=>q.id))}>全選</button>
+              <button className="text-[11px] font-bold px-2 py-1 rounded bg-slate-100 border"
+                onClick={() => setAiSelected([])}>清空</button>
+              <button className="text-sm font-bold px-3 py-1.5 rounded-lg bg-violet-600 text-white"
+                onClick={() => navigator.clipboard.writeText(buildClassReviewPrompt()).then(()=>alert("已複製試後檢討 Prompt")).catch(()=>alert("複製失敗"))}>
+                複製試後檢討 AI Prompt
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 function App() {
   const [view, setView] = useState("import");
   const [students, setStudents] = useState([]);
   const [homeworkMaps, setHomeworkMaps] = useState({});
   const [homeworkScores, setHomeworkScores] = useState({});
+  const [quizMaps, setQuizMaps] = useState({});
+  const [quizScores, setQuizScores] = useState({});
   const [loading, setLoading] = useState(true);
   const [cohort, setCohort] = useState("所有學生");
 
@@ -1201,10 +1587,10 @@ function App() {
       setHomeworkMaps(maps);
       const scores = await loadHomeworkScores(stu.map(s=>s.id));
       setHomeworkScores(scores);
-      const cohorts = Array.from(new Set(stu.map(s=>s.cohort).filter(Boolean)));
-      if (cohorts.length && (cohort==="所有學生" || !cohorts.includes(cohort))) {
-        // keep 所有學生 as option
-      }
+      const qmaps = await loadQuizMaps();
+      setQuizMaps(qmaps);
+      const qscores = await loadQuizScores(stu.map(s=>s.id));
+      setQuizScores(qscores);
     } catch(e) { alert("載入失敗："+e.message); }
     setLoading(false);
   }, []);
@@ -1233,6 +1619,7 @@ function App() {
         {view==="hwGrade" && <HwGradeView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
         {view==="hwSummary" && <HwSummaryView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
         {view==="hwChase" && <HwChaseView activeStudents={activeStudents} homeworkMaps={homeworkMaps} homeworkScores={homeworkScores} setHomeworkScores={setHomeworkScores} currentCohort={cohort==="所有學生"?"":cohort} />}
+        {view==="quizInput" && <QuizInputAnalysisView activeStudents={activeStudents} quizMaps={quizMaps} quizScores={quizScores} setQuizScores={setQuizScores} />}
       </main>
     </div>
   );
