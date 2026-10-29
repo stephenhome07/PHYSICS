@@ -34,6 +34,55 @@ const firebaseConfig = {
 if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
+// ---------- 課程大綱（Topic ID）----------
+let SYLLABUS_TOPICS = {};
+
+async function loadSyllabus() {
+  try {
+    const snap = await db.collection("syllabus").doc("all").get();
+    if (snap.exists) {
+      const data = snap.data();
+      SYLLABUS_TOPICS = data.data || data.topics || data || {};
+      if (SYLLABUS_TOPICS && SYLLABUS_TOPICS.data && typeof SYLLABUS_TOPICS.data === "object") {
+        SYLLABUS_TOPICS = SYLLABUS_TOPICS.data;
+      }
+    }
+  } catch (e) { console.warn("syllabus", e); }
+  return SYLLABUS_TOPICS;
+}
+
+function getSyllabusTableText(topicIds) {
+  const topics = SYLLABUS_TOPICS || {};
+  const lines = ["課題編號\t範疇\t課題名稱\t學習要求"];
+  let idList = [];
+  if (topicIds && topicIds.length) {
+    idList = [...new Set(topicIds.filter(Boolean))];
+  } else {
+    idList = Object.keys(topics);
+  }
+  idList.forEach(id => {
+    const val = topics[id];
+    if (typeof val === "object" && val !== null) {
+      lines.push(`${id}\t${val.section || ""}\t${val.topic || val.name || ""}\t${val.desc || ""}`);
+    } else if (val != null && val !== undefined) {
+      lines.push(`${id}\t\t${val}\t`);
+    } else {
+      lines.push(`${id}\t\t\t`);
+    }
+  });
+  if (lines.length === 1) {
+    return "（課程大綱尚未載入。請匯入含 syllabus 的 Sheet JSON。）";
+  }
+  return lines.join("\n");
+}
+
+function formatWeakItem(q, extra) {
+  const tid = q.topicId || "";
+  const desc = q.topicDesc || q.desc || "";
+  const pct = extra || "";
+  return `- [${q.id}] topicId: ${tid || "（無）"}｜${desc}${pct ? "｜" + pct : ""}`;
+}
+
 const STATUS_META = {
   MISSING: { label: "未交", cls: "bg-slate-100 text-slate-600 border-slate-200" },
   PENDING: { label: "欠改正", cls: "bg-rose-50 text-rose-700 border-rose-200" },
@@ -854,21 +903,23 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
     const list = (selected.length ? selected : questionStats.filter(q => q.rate !== null && q.rate < 0.6));
     const weakList = list.map(q => {
       const pct = q.rate !== null ? Math.round(q.rate * 100) + "%" : "無資料";
-      return `- [${q.id}] ${q.topicId || ""} ${q.topicDesc || ""}（全班得分率 ${pct}，難度：${q.level || "中"}）`;
+      return formatWeakItem(q, `全班得分率 ${pct}，難度：${q.level || "中"}`);
     }).join("\n") || "- （請自行補充難點）";
+    const topicIds = list.map(q => q.topicId).filter(Boolean);
+    const syllabus = getSyllabusTableText(topicIds);
 
     const tasks = [];
     if (aiExtra.practice) {
-      tasks.push(`A. 針對性練習卷：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ，難度「${aiLevel}」，繁體中文，貼近 HKDSE。MC 附常見錯項陷阱；LQ 附分步評分。`);
+      tasks.push(`A. 針對性練習卷：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ，難度「${aiLevel}」，繁體中文，貼近 HKDSE。MC 附常見錯項陷阱；LQ 附分步評分。每題請標明對應 topicId。`);
     }
     if (aiExtra.explainImg) {
-      tasks.push(`B. 解說圖片：為上述每條弱項各設計 1 張「可在簡報使用」的概念圖／示意圖描述（用文字詳細描述畫面構圖、標註、重點公式），方便我再交給繪圖 AI。`);
+      tasks.push(`B. 解說圖片：為上述每條弱項各設計 1 張「可在簡報使用」的概念圖／示意圖描述（構圖、標註、重點公式），並註明 topicId。`);
     }
     if (aiExtra.ppt) {
-      tasks.push(`C. PPT 大綱：以勾選的弱項為綱，產出 8–12 頁教學簡報大綱（每頁：標題、要點 bullet、建議圖示、老師口述提示）。`);
+      tasks.push(`C. PPT 大綱：以勾選弱項為綱，8–12 頁（標題、要點、建議圖示、口述提示），標明 topicId。`);
     }
     if (aiExtra.notes) {
-      tasks.push(`D. 溫習筆記：產出精簡筆記（定義 → 公式 → 易錯點 → 一例題），對應上述弱項。`);
+      tasks.push(`D. 溫習筆記：定義 → 公式 → 易錯點 → 一例題，對應 topicId。`);
     }
     if (!tasks.length) tasks.push(`A. 針對性練習卷：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ。`);
 
@@ -876,15 +927,18 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
 
 【任務】根據以下「功課弱項診斷」（功課 ${selectedHw}：${map?.title || ""}），完成指定產出。
 
-【難點列表】
+【難點列表】（每項含 topicId）
 ${weakList}
 
+【課程大綱參考】（僅列相關 Topic ID）
+${syllabus}
+
 【產出要求】
-${tasks.map((t,i)=>`${i+1}. ${t}`).join("\n")}
+${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
 
 【其他】
 - 語言：繁體中文
-- 題目須對應弱項，由淺入深
+- 題目須對應弱項與 topicId，由淺入深
 - 不要多餘開場白，直接給內容`;
   };
 
@@ -1059,7 +1113,7 @@ ${tasks.map((t,i)=>`${i+1}. ${t}`).join("\n")}
                       onChange={() => setAiSelected(prev => prev.includes(q.id) ? prev.filter(x=>x!==q.id) : [...prev, q.id])} />
                   </td>
                   <td className="px-2 py-1.5 mono font-bold">{q.id}</td>
-                  <td className="px-2 py-1.5 truncate max-w-[280px]" title={q.topicDesc}>{q.topicId} {q.topicDesc}</td>
+                  <td className="px-2 py-1.5 truncate max-w-[280px]" title={q.topicDesc}><span className="mono text-[10px] text-indigo-600 font-bold">{q.topicId||"—"}</span> {q.topicDesc}</td>
                   <td className="px-2 py-1.5 text-center">{q.attempts}</td>
                   <td className={`px-2 py-1.5 text-center ${color}`}>{pct === null ? "—" : pct + "%"}</td>
                 </tr>
@@ -1068,43 +1122,48 @@ ${tasks.map((t,i)=>`${i+1}. ${t}`).join("\n")}
           </tbody>
         </table>
       </div>
-      <div className="flex flex-wrap gap-2 text-[11px] font-bold">
-        <button className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-100" onClick={()=>setAiSelected(weakDefaultIds)}>全選弱項(&lt;60%)</button>
-        <button className="px-2 py-1 rounded bg-slate-100 text-slate-600 border" onClick={()=>setAiSelected(questionStats.map(q=>q.id))}>全選全部</button>
-        <button className="px-2 py-1 rounded bg-slate-100 text-slate-600 border" onClick={()=>setAiSelected([])}>清空</button>
-      </div>
-      <div className="grid sm:grid-cols-4 gap-3">
-        <label className="text-xs font-bold text-slate-500">難度
-          <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
-            <option value="淺">淺</option>
-            <option value="中">中</option>
-            <option value="深">深</option>
-          </select>
-        </label>
-        <label className="text-xs font-bold text-slate-500">MC 題數
-          <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
-        </label>
-        <label className="text-xs font-bold text-slate-500">LQ 題數
-          <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
-        </label>
-        <div className="text-xs font-bold text-slate-500">產出類型
-          <div className="mt-1 flex flex-wrap gap-2 font-semibold text-slate-700">
+      <div className="rounded-2xl border-2 border-violet-300 bg-violet-50 p-5 space-y-4">
+        <div className="font-black text-violet-900 text-lg">功課 AI Prompt 生成</div>
+        <p className="text-sm text-violet-800">弱項含 <b>topicId</b>，並附上<strong>課程大綱參考</strong>（Syllabus）。產出類型可多選，區塊已加大方便點選。</p>
+        <div className="flex flex-wrap gap-2">
+          <button className="px-3 py-1.5 rounded-lg bg-rose-100 text-rose-800 font-bold text-sm border border-rose-200" onClick={()=>setAiSelected(weakDefaultIds)}>全選弱項(&lt;60%)</button>
+          <button className="px-3 py-1.5 rounded-lg bg-white border font-bold text-sm" onClick={()=>setAiSelected(questionStats.map(q=>q.id))}>全選全部</button>
+          <button className="px-3 py-1.5 rounded-lg bg-white border font-bold text-sm" onClick={()=>setAiSelected([])}>清空</button>
+        </div>
+        <div className="grid sm:grid-cols-3 gap-3">
+          <label className="text-sm font-bold text-slate-700">難度
+            <select className="mt-1 w-full border-2 border-violet-200 rounded-lg px-3 py-2 text-sm" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
+              <option value="淺">淺</option>
+              <option value="中">中</option>
+              <option value="深">深</option>
+            </select>
+          </label>
+          <label className="text-sm font-bold text-slate-700">MC 題數
+            <input type="number" min={0} className="mt-1 w-full border-2 border-violet-200 rounded-lg px-3 py-2 text-sm" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
+          </label>
+          <label className="text-sm font-bold text-slate-700">LQ 題數
+            <input type="number" min={0} className="mt-1 w-full border-2 border-violet-200 rounded-lg px-3 py-2 text-sm" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
+          </label>
+        </div>
+        <div>
+          <div className="text-sm font-bold text-slate-700 mb-2">產出類型（可多選）</div>
+          <div className="flex flex-wrap gap-3">
             {[
               ["practice","弱項練習"],
               ["explainImg","解說圖描述"],
               ["ppt","PPT 大綱"],
               ["notes","筆記"],
             ].map(([k,lab])=>(
-              <label key={k} className="flex items-center gap-1 text-[11px]">
-                <input type="checkbox" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} /> {lab}
+              <label key={k} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 text-sm font-bold cursor-pointer ${aiExtra[k]?"border-violet-500 bg-white text-violet-800":"border-slate-200 bg-white/60 text-slate-600"}`}>
+                <input type="checkbox" className="w-4 h-4" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} /> {lab}
               </label>
             ))}
           </div>
         </div>
+        <button className="w-full sm:w-auto bg-violet-600 hover:bg-violet-700 text-white font-black px-8 py-3 rounded-xl text-base shadow" onClick={copyPrompt}>
+          複製 AI Prompt（已選 {aiSelected.length} 題 · 含 Syllabus）
+        </button>
       </div>
-      <button className="bg-violet-600 hover:bg-violet-700 text-white font-bold px-4 py-2.5 rounded-lg text-sm" onClick={copyPrompt}>
-        複製 AI Prompt（已選 {aiSelected.length} 題）
-      </button>
     </div>
     </div>
   );
@@ -1607,10 +1666,55 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
       return `- ${s ? `${s.class}-${s.num} ${s.name}` : sid}（${cat}，成績 ${score}；備註：${m.remark || "無"}）`;
     }).join("\n") || "- （未選學生）";
 
-    const weakFromClass = (classStats && classStats.processed)
-      ? classStats.processed.filter(q => q.pct < 60 && q.attempts > 0).slice(0, 8)
-          .map(q => `- ${q.id}: ${q.desc || q.topicId}（全班 ${Math.round(q.pct)}%）`).join("\n")
-      : "- （暫無全班數據，請按小測範圍出題）";
+    // 針對每位補測同學的個人失分題（含 topicId）
+    const personalWeakBlocks = ids.map(sid => {
+      const s = activeStudents.find(x => x.id === sid);
+      const name = s ? `${s.class}-${s.num} ${s.name}` : sid;
+      const rec = quizScores[sid]?.[selectedQuiz] || {};
+      const weakQs = [];
+      qList.forEach(q => {
+        const raw = rec[q.id];
+        if (raw === undefined || raw === null || String(raw).trim() === "") {
+          weakQs.push(formatWeakItem(q, "未作答／缺分"));
+          return;
+        }
+        const sc = quizQuestionScore(q, raw);
+        const max = q.max || 1;
+        if (sc == null) return;
+        if (sc < max * 0.5) {
+          weakQs.push(formatWeakItem(q, `得分 ${sc}/${max}`));
+        }
+      });
+      // 若無個人數據（完全無測），用全班最弱題作參考並註明
+      if (!weakQs.length) {
+        const fallback = (classStats && classStats.processed)
+          ? classStats.processed.filter(q => q.pct < 60 && q.attempts > 0).slice(0, 6)
+          : [];
+        if (fallback.length) {
+          fallback.forEach(q => weakQs.push(formatWeakItem(q, `全班弱項參考 ${Math.round(q.pct)}%（該生無測）`)));
+        } else {
+          weakQs.push("- （暫無弱項數據，請按小測範圍與課程大綱出題）");
+        }
+      }
+      return `### ${name}\n${weakQs.join("\n")}`;
+    }).join("\n\n") || "- （未選學生）";
+
+    const allTopicIds = [];
+    ids.forEach(sid => {
+      const rec = quizScores[sid]?.[selectedQuiz] || {};
+      qList.forEach(q => {
+        const raw = rec[q.id];
+        const sc = (raw === undefined || raw === null || String(raw).trim() === "") ? 0 : quizQuestionScore(q, raw);
+        const max = q.max || 1;
+        if (raw === undefined || raw === null || String(raw).trim() === "" || (sc != null && sc < max * 0.5)) {
+          if (q.topicId) allTopicIds.push(q.topicId);
+        }
+      });
+    });
+    if (!allTopicIds.length && classStats) {
+      classStats.processed.filter(q => q.pct < 60).forEach(q => { if (q.topicId) allTopicIds.push(q.topicId); });
+    }
+    const syllabus = getSyllabusTableText(allTopicIds);
 
     return `【身份】你是香港 DSE 物理科老師。
 
@@ -1621,8 +1725,11 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
 【補測學生】
 ${lines}
 
-【可參考的全班弱項】
-${weakFromClass}
+【學生個人弱點】（每項必須含 topicId；請針對這些弱點出題）
+${personalWeakBlocks}
+
+【課程大綱參考】（相關 Topic ID 與學習要求）
+${syllabus}
 
 【基本設定】
 - 語言：繁體中文
@@ -1632,10 +1739,11 @@ ${weakFromClass}
 - ★ 必須強調：以「互動式小測驗」形式、在 **Canvas** 中呈現（逐題顯示、學生作答後再給對錯與簡短解說）
 
 【要求】
-1. 題目貼近原小測課題與常見失分點，由淺入深。
-2. MC 附 4 選項；答錯時指出迷思。
-3. 不要一次公開全部答案；先出題，待學生回答再評。
-4. 開頭用一句話說明這是補測練習，語氣鼓勵。`;
+1. 題目必須針對上方「學生個人弱點」的 topicId 與考點，由淺入深。
+2. 每題標明對應 topicId。
+3. MC 附 4 選項；答錯時指出迷思。
+4. 不要一次公開全部答案；先出題，待學生回答再評。
+5. 開頭用一句話說明這是補測練習，語氣鼓勵。`;
   };
 
   // class analysis for selected quiz
@@ -1683,25 +1791,30 @@ ${weakFromClass}
   const buildQuizPrompt = () => {
     if (!classStats) return "尚無數據";
     const list = (aiSelected.length ? classStats.processed.filter(q => aiSelected.includes(q.id)) : classStats.processed.filter(q => q.pct < 60 && q.attempts > 0));
-    const weakQ = list.map(q => `- 題號 ${q.id} (${q.type}): ${q.topicId || ""} ${q.desc || ""}（全班得分率 ${Math.round(q.pct)}%，老師預設：${q.level || "中"}）`).join("\n") || "- （無）";
+    const weakQ = list.map(q => formatWeakItem(q, `全班得分率 ${Math.round(q.pct)}%，老師預設：${q.level || "中"}`)).join("\n") || "- （無）";
+    const topicIds = list.map(q => q.topicId).filter(Boolean);
+    const syllabus = getSyllabusTableText(topicIds);
     const tasks = [];
-    if (aiExtra.practice) tasks.push(`A. 針對性練習：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ，難度「${aiLevel}」。MC 附常見錯項；LQ 附分步評分。貼近 HKDSE。`);
-    if (aiExtra.review) tasks.push(`B. 約 15 分鐘試後檢討大綱：弱項概念日常例子、常見迷思、3 條堂上 Concept Checking Questions。`);
-    if (aiExtra.explainImg) tasks.push(`C. 解說圖片：每條弱項 1 張簡報用概念圖文字描述（構圖、標註、公式）。`);
-    if (aiExtra.ppt) tasks.push(`D. PPT 大綱：8–12 頁（標題、要点、建議圖示、口述提示）。`);
-    if (aiExtra.notes) tasks.push(`E. 溫習筆記：定義 → 公式 → 易錯點 → 一例題。`);
+    if (aiExtra.practice) tasks.push(`A. 針對性練習：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ，難度「${aiLevel}」。MC 附常見錯項；LQ 附分步評分。每題標明 topicId。貼近 HKDSE。`);
+    if (aiExtra.review) tasks.push(`B. 約 15 分鐘試後檢討大綱：弱項概念日常例子、常見迷思、3 條堂上 Concept Checking Questions（對應 topicId）。`);
+    if (aiExtra.explainImg) tasks.push(`C. 解說圖片：每條弱項 1 張簡報用概念圖文字描述（構圖、標註、公式），註明 topicId。`);
+    if (aiExtra.ppt) tasks.push(`D. PPT 大綱：8–12 頁（標題、要點、建議圖示、口述提示），標明 topicId。`);
+    if (aiExtra.notes) tasks.push(`E. 溫習筆記：定義 → 公式 → 易錯點 → 一例題，對應 topicId。`);
     if (!tasks.length) tasks.push(`A. 針對性練習：${aiMc} MC + ${aiLq} LQ。`);
     return `【身份】你是香港 DSE 物理科老師，學生約 Band 3。
 
 【任務】全班剛完成小測「${map?.title || selectedQuiz}」（全班平均得分率 ${classStats.avgPct.toFixed(1)}%，${classStats.attempted} 人已入分）。
 
-【弱項／選中題目】
+【弱項／選中題目】（每項含 topicId）
 ${weakQ}
+
+【課程大綱參考】（相關 Topic ID）
+${syllabus}
 
 【產出要求】
 ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
 
-【其他】繁體中文；直接給內容，不要多餘開場白。`;
+【其他】繁體中文；題目須對應 topicId；直接給內容，不要多餘開場白。`;
   };
 
   const copyQuizPrompt = () => {
@@ -1810,43 +1923,34 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="font-bold text-lg">補測管理 · {selectedQuiz}</h3>
-            <p className="text-xs text-slate-500">兩類：無測過（缺席／未入分）、不合格（&lt;50%）。可記錄是否完成與備註。</p>
+            <p className="text-xs text-slate-500">兩類：無測過、不合格（&lt;50%）。Prompt 會用<strong>個人失分題 + topicId + 課程大綱</strong>。</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {qzLoading && <span className="text-xs text-slate-400">載入中…</span>}
-            <button className="text-xs font-bold px-3 py-1.5 rounded-lg bg-slate-100 border" onClick={addSuggestedToMakeup}>
-              加入建議名單（無測+不合格）
-            </button>
-          </div>
+          <button className="text-xs font-bold px-3 py-1.5 rounded-lg bg-slate-100 border" onClick={addSuggestedToMakeup}>加入建議名單（無測+不合格）</button>
         </div>
-
         <div className="grid md:grid-cols-2 gap-3 text-sm">
           <div className="border rounded-xl p-3 bg-slate-50">
-            <div className="font-bold text-slate-600 text-xs mb-2">系統偵測 · 無測過（{suggestedMakeup.filter(x=>x.category==="ABSENT").length}）</div>
+            <div className="font-bold text-slate-600 text-xs mb-2">無測過（{suggestedMakeup.filter(x=>x.category==="ABSENT").length}）</div>
             <div className="max-h-28 overflow-auto space-y-1">
               {suggestedMakeup.filter(x=>x.category==="ABSENT").map(({student:s}) => (
                 <div key={s.id} className="flex justify-between text-xs">
                   <span>{s.class}-{s.num} {s.name}</span>
-                  <button className="text-indigo-600 font-bold" onClick={()=>ensureMakeupEntry(s.id,"ABSENT")}>加入補測</button>
+                  <button className="text-indigo-600 font-bold" onClick={()=>ensureMakeupEntry(s.id,"ABSENT")}>加入</button>
                 </div>
               ))}
-              {!suggestedMakeup.some(x=>x.category==="ABSENT") && <span className="text-slate-400 text-xs">無</span>}
             </div>
           </div>
           <div className="border rounded-xl p-3 bg-rose-50/50">
-            <div className="font-bold text-rose-700 text-xs mb-2">系統偵測 · 不合格（{suggestedMakeup.filter(x=>x.category==="FAIL").length}）</div>
+            <div className="font-bold text-rose-700 text-xs mb-2">不合格（{suggestedMakeup.filter(x=>x.category==="FAIL").length}）</div>
             <div className="max-h-28 overflow-auto space-y-1">
               {suggestedMakeup.filter(x=>x.category==="FAIL").map(({student:s}) => (
                 <div key={s.id} className="flex justify-between text-xs">
-                  <span>{s.class}-{s.num} {s.name} <span className="text-rose-600 font-bold">{(() => { const a=calcStudentTotal(s.id); return a?`${a.total}/${a.max}`:""; })()}</span></span>
-                  <button className="text-indigo-600 font-bold" onClick={()=>ensureMakeupEntry(s.id,"FAIL")}>加入補測</button>
+                  <span>{s.class}-{s.num} {s.name}</span>
+                  <button className="text-indigo-600 font-bold" onClick={()=>ensureMakeupEntry(s.id,"FAIL")}>加入</button>
                 </div>
               ))}
-              {!suggestedMakeup.some(x=>x.category==="FAIL") && <span className="text-slate-400 text-xs">無</span>}
             </div>
           </div>
         </div>
-
         <div className="overflow-auto max-h-64 border rounded-xl">
           <table className="min-w-full text-xs">
             <thead className="bg-slate-50 sticky top-0">
@@ -1861,7 +1965,7 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             </thead>
             <tbody>
               {Object.keys(makeup).length === 0 && (
-                <tr><td colSpan={6} className="px-2 py-6 text-center text-slate-400">尚未加入補測學生。可按「加入建議名單」或從上方偵測列表加入。</td></tr>
+                <tr><td colSpan={6} className="px-2 py-6 text-center text-slate-400">尚未加入補測學生</td></tr>
               )}
               {Object.keys(makeup).map(sid => {
                 const s = activeStudents.find(x => x.id === sid);
@@ -1906,35 +2010,30 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             </tbody>
           </table>
         </div>
-        {makeupSaving && <div className="text-[11px] text-slate-400">補測記錄儲存中…</div>}
-
-        <div className="border-t pt-3 space-y-2">
-          <div className="text-xs font-bold text-slate-600">補測 AI Prompt（針對勾選學生；未勾選則用表上全部）</div>
-          <div className="grid sm:grid-cols-3 gap-2">
-            <label className="text-xs font-bold text-slate-500">難度
-              <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={mkLevel} onChange={e=>setMkLevel(e.target.value)}>
-                <option value="淺">淺</option>
-                <option value="中">中</option>
-                <option value="深">深</option>
+        <div className="rounded-2xl border-2 border-violet-300 bg-violet-50 p-4 space-y-3">
+          <div className="font-black text-violet-900 text-base">補測 AI Prompt</div>
+          <p className="text-xs text-violet-800">會附上<strong>每位學生個人弱點（含 topicId）</strong>與<strong>課程大綱</strong>；Canvas 互動式小測驗。</p>
+          <div className="grid sm:grid-cols-3 gap-3">
+            <label className="text-sm font-bold text-slate-700">難度
+              <select className="mt-1 w-full border-2 border-violet-200 rounded-lg px-3 py-2 text-sm" value={mkLevel} onChange={e=>setMkLevel(e.target.value)}>
+                <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
               </select>
             </label>
-            <label className="text-xs font-bold text-slate-500">MC（預設 10）
-              <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={mkMc} onChange={e=>setMkMc(parseInt(e.target.value)||0)} />
+            <label className="text-sm font-bold text-slate-700">MC（預設 10）
+              <input type="number" min={0} className="mt-1 w-full border-2 border-violet-200 rounded-lg px-3 py-2 text-sm" value={mkMc} onChange={e=>setMkMc(parseInt(e.target.value)||0)} />
             </label>
-            <label className="text-xs font-bold text-slate-500">LQ
-              <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={mkLq} onChange={e=>setMkLq(parseInt(e.target.value)||0)} />
+            <label className="text-sm font-bold text-slate-700">LQ
+              <input type="number" min={0} className="mt-1 w-full border-2 border-violet-200 rounded-lg px-3 py-2 text-sm" value={mkLq} onChange={e=>setMkLq(parseInt(e.target.value)||0)} />
             </label>
           </div>
-          <p className="text-[11px] text-violet-700 bg-violet-50 border border-violet-100 rounded-lg px-2 py-1.5">
-            Prompt 會要求在 <b>Canvas</b> 以<strong>互動式小測驗</strong>形式生成（逐題作答、即時回饋）。
-          </p>
-          <button className="bg-violet-600 hover:bg-violet-700 text-white font-bold px-4 py-2 rounded-lg text-sm"
+          <button className="w-full sm:w-auto bg-violet-600 hover:bg-violet-700 text-white font-black px-6 py-3 rounded-xl text-base shadow"
             onClick={() => navigator.clipboard.writeText(buildMakeupPrompt()).then(()=>alert("已複製補測 Prompt")).catch(()=>alert("複製失敗"))}>
             複製補測 AI Prompt（{makeupSel.length || Object.keys(makeup).length} 人）
           </button>
         </div>
       </div>
 
+      {/* 整班弱點分析 */}
       <div className="bg-white rounded-2xl border p-5 space-y-5">
         <h3 className="font-bold text-lg">整班弱點分析 · {selectedQuiz} {map?.title}</h3>
         {!classStats ? (
@@ -1944,11 +2043,10 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             <div className="grid sm:grid-cols-3 gap-3">
               <div className="rounded-2xl border bg-slate-50 p-4">
                 <div className="text-xs font-bold text-slate-500">全班平均得分</div>
-                <div className="text-2xl font-black text-slate-800 mt-1 tabular-nums">
+                <div className="text-2xl font-black mt-1 tabular-nums">
                   {(classStats.classTotal / Math.max(classStats.attempted,1)).toFixed(1)}
                   <span className="text-base font-bold text-slate-400"> / {(classStats.classMax / Math.max(classStats.attempted,1)).toFixed(1)}</span>
                 </div>
-                <div className="text-[11px] text-slate-400 mt-1">已入分 {classStats.attempted} 人</div>
               </div>
               <div className="rounded-2xl border bg-indigo-50 border-indigo-100 p-4">
                 <div className="text-xs font-bold text-indigo-600">整體得分率</div>
@@ -1965,28 +2063,22 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                 </div>
               </div>
             </div>
-
-            <div>
-              <h4 className="font-bold text-slate-800 mb-1">試卷難度診斷（P-Value 難度指數）</h4>
-              <p className="text-xs text-slate-500 mb-3">P-Value（平均得分率）反映題目實際難度：淺 ≥70%、中 40–69%、深 &lt;40%。</p>
-              <div className="grid md:grid-cols-3 gap-3">
-                {[
-                  { key: "easy", title: "淺 (P-Value ≥ 70%)", cls: "bg-emerald-50 border-emerald-200 text-emerald-800", filter: q => q.attempts>0 && q.pct >= 70 },
-                  { key: "mid", title: "中 (40% ≤ P-Value < 70%)", cls: "bg-amber-50 border-amber-200 text-amber-900", filter: q => q.attempts>0 && q.pct >= 40 && q.pct < 70 },
-                  { key: "hard", title: "深 (P-Value < 40%)", cls: "bg-rose-50 border-rose-200 text-rose-800", filter: q => q.attempts>0 && q.pct < 40 },
-                ].map(card => {
-                  const list = classStats.processed.filter(card.filter);
-                  return (
-                    <div key={card.key} className={`rounded-2xl border p-4 ${card.cls}`}>
-                      <div className="font-bold text-sm">{card.title}</div>
-                      <div className="text-3xl font-black my-2">{list.length} <span className="text-base font-bold">題</span></div>
-                      <div className="text-xs font-semibold leading-relaxed break-words">{list.map(q=>q.id).join(", ") || "—"}</div>
-                    </div>
-                  );
-                })}
-              </div>
+            <div className="grid md:grid-cols-3 gap-3">
+              {[
+                { title: "淺 (P-Value ≥ 70%)", cls: "bg-emerald-50 border-emerald-200 text-emerald-800", filter: q => q.attempts>0 && q.pct >= 70 },
+                { title: "中 (40% ≤ P-Value < 70%)", cls: "bg-amber-50 border-amber-200 text-amber-900", filter: q => q.attempts>0 && q.pct >= 40 && q.pct < 70 },
+                { title: "深 (P-Value < 40%)", cls: "bg-rose-50 border-rose-200 text-rose-800", filter: q => q.attempts>0 && q.pct < 40 },
+              ].map((card, i) => {
+                const list = classStats.processed.filter(card.filter);
+                return (
+                  <div key={i} className={`rounded-2xl border p-4 ${card.cls}`}>
+                    <div className="font-bold text-sm">{card.title}</div>
+                    <div className="text-3xl font-black my-2">{list.length} <span className="text-base">題</span></div>
+                    <div className="text-xs font-semibold break-words">{list.map(q=>q.id).join(", ") || "—"}</div>
+                  </div>
+                );
+              })}
             </div>
-
             <div className="overflow-auto max-h-80 border rounded-xl">
               <table className="min-w-full text-xs">
                 <thead className="bg-blue-50 sticky top-0">
@@ -1994,10 +2086,11 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                     <th className="px-2 py-2 text-left">選</th>
                     <th className="px-2 py-2 text-left">題號</th>
                     <th className="px-2 py-2 text-left">考核概念</th>
-                    <th className="px-2 py-2 text-center">老師預設難度</th>
-                    <th className="px-2 py-2 text-center">學生實測得分率</th>
-                    <th className="px-2 py-2 text-center">學生實際體感</th>
-                    <th className="px-2 py-2 text-left">診斷結果</th>
+                    <th className="px-2 py-2 text-center">topicId</th>
+                    <th className="px-2 py-2 text-center">預設難度</th>
+                    <th className="px-2 py-2 text-center">得分率</th>
+                    <th className="px-2 py-2 text-center">體感</th>
+                    <th className="px-2 py-2 text-left">診斷</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2008,11 +2101,10 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                     let diag = "—", diagCls = "text-slate-400";
                     if (q.attempts) {
                       if (rank[actualLv] === rank[teacherLv]) { diag = "✓ 符合預期"; diagCls = "text-emerald-600 font-bold"; }
-                      else if (rank[actualLv] > rank[teacherLv]) { diag = "⚠ 比預期深（殺手題）"; diagCls = "text-rose-600 font-bold"; }
-                      else { diag = "⚠ 比預期淺（送分題）"; diagCls = "text-amber-600 font-bold"; }
+                      else if (rank[actualLv] > rank[teacherLv]) { diag = "⚠ 殺手題"; diagCls = "text-rose-600 font-bold"; }
+                      else { diag = "⚠ 送分題"; diagCls = "text-amber-600 font-bold"; }
                     }
                     const pctCls = !q.attempts ? "text-slate-400" : q.pct < 40 ? "text-rose-600 font-bold" : q.pct < 70 ? "text-amber-600 font-bold" : "text-emerald-600 font-bold";
-                    const lvCls = actualLv==="淺"?"text-emerald-600 font-bold":actualLv==="中"?"text-amber-600 font-bold":actualLv==="深"?"text-rose-600 font-bold":"text-slate-400";
                     return (
                       <tr key={q.id} className="border-t">
                         <td className="px-2 py-1.5">
@@ -2020,10 +2112,11 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                             onChange={() => setAiSelected(prev => prev.includes(q.id) ? prev.filter(x=>x!==q.id) : [...prev, q.id])} />
                         </td>
                         <td className="px-2 py-1.5 mono font-bold">{q.id}</td>
-                        <td className="px-2 py-1.5 max-w-[220px] truncate" title={q.desc}>{q.desc || q.topicId}</td>
+                        <td className="px-2 py-1.5 max-w-[180px] truncate" title={q.desc}>{q.desc || ""}</td>
+                        <td className="px-2 py-1.5 text-center mono text-[10px]">{q.topicId || "—"}</td>
                         <td className="px-2 py-1.5 text-center">{teacherLv}</td>
                         <td className={`px-2 py-1.5 text-center ${pctCls}`}>{q.attempts ? q.pct.toFixed(1)+"%" : "—"}</td>
-                        <td className={`px-2 py-1.5 text-center ${lvCls}`}>{actualLv}</td>
+                        <td className="px-2 py-1.5 text-center font-bold">{actualLv}</td>
                         <td className={`px-2 py-1.5 ${diagCls}`}>{diag}</td>
                       </tr>
                     );
@@ -2031,45 +2124,45 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                 </tbody>
               </table>
             </div>
-
-            <div className="border-t pt-4 space-y-3">
-              <div className="flex flex-wrap gap-2 text-[11px] font-bold">
-                <button className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-100"
+            <div className="rounded-2xl border-2 border-violet-300 bg-violet-50 p-5 space-y-4">
+              <div className="font-black text-violet-900 text-lg">全班 AI Prompt 生成</div>
+              <p className="text-sm text-violet-800">弱項含 <b>topicId</b>，並附上<strong>課程大綱參考</strong>。</p>
+              <div className="flex flex-wrap gap-2">
+                <button className="px-3 py-1.5 rounded-lg bg-rose-100 text-rose-800 font-bold text-sm border border-rose-200"
                   onClick={() => setAiSelected(classStats.processed.filter(q=>q.pct<60&&q.attempts>0).map(q=>q.id))}>全選弱項(&lt;60%)</button>
-                <button className="px-2 py-1 rounded bg-slate-100 border" onClick={() => setAiSelected(classStats.processed.map(q=>q.id))}>全選全部</button>
-                <button className="px-2 py-1 rounded bg-slate-100 border" onClick={() => setAiSelected([])}>清空</button>
+                <button className="px-3 py-1.5 rounded-lg bg-white border font-bold text-sm" onClick={() => setAiSelected(classStats.processed.map(q=>q.id))}>全選</button>
+                <button className="px-3 py-1.5 rounded-lg bg-white border font-bold text-sm" onClick={() => setAiSelected([])}>清空</button>
               </div>
-              <div className="grid sm:grid-cols-4 gap-3">
-                <label className="text-xs font-bold text-slate-500">難度
-                  <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
-                    <option value="淺">淺</option>
-                    <option value="中">中</option>
-                    <option value="深">深</option>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <label className="text-sm font-bold text-slate-700">難度
+                  <select className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
+                    <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
                   </select>
                 </label>
-                <label className="text-xs font-bold text-slate-500">MC 題數
-                  <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
+                <label className="text-sm font-bold text-slate-700">MC 題數
+                  <input type="number" min={0} className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
                 </label>
-                <label className="text-xs font-bold text-slate-500">LQ 題數
-                  <input type="number" min={0} className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
+                <label className="text-sm font-bold text-slate-700">LQ 題數
+                  <input type="number" min={0} className="mt-1 w-full border-2 rounded-lg px-3 py-2" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
                 </label>
-                <div className="text-xs font-bold text-slate-500">產出類型
-                  <div className="mt-1 flex flex-wrap gap-2 font-semibold text-slate-700">
-                    {[
-                      ["practice","弱項練習"],
-                      ["review","試後檢討大綱"],
-                      ["explainImg","解說圖描述"],
-                      ["ppt","PPT 大綱"],
-                      ["notes","筆記"],
-                    ].map(([k,lab])=>(
-                      <label key={k} className="flex items-center gap-1 text-[11px]">
-                        <input type="checkbox" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} /> {lab}
-                      </label>
-                    ))}
-                  </div>
+              </div>
+              <div>
+                <div className="text-sm font-bold text-slate-700 mb-2">產出類型（可多選）</div>
+                <div className="flex flex-wrap gap-3">
+                  {[
+                    ["practice","弱項練習"],
+                    ["review","試後檢討大綱"],
+                    ["explainImg","解說圖描述"],
+                    ["ppt","PPT 大綱"],
+                    ["notes","筆記"],
+                  ].map(([k,lab])=>(
+                    <label key={k} className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 text-sm font-bold cursor-pointer ${aiExtra[k]?"border-violet-500 bg-white text-violet-800":"border-slate-200 bg-slate-50 text-slate-600"}`}>
+                      <input type="checkbox" className="w-4 h-4" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} /> {lab}
+                    </label>
+                  ))}
                 </div>
               </div>
-              <button className="bg-violet-600 hover:bg-violet-700 text-white font-bold px-4 py-2.5 rounded-lg text-sm" onClick={copyQuizPrompt}>
+              <button className="w-full sm:w-auto bg-violet-600 hover:bg-violet-700 text-white font-black px-8 py-3 rounded-xl text-base shadow" onClick={copyQuizPrompt}>
                 複製 AI Prompt（已選 {aiSelected.length} 題）
               </button>
             </div>
@@ -2079,7 +2172,6 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
     </div>
   );
 }
-
 
 function App() {
   const [view, setView] = useState("import");
@@ -2100,7 +2192,7 @@ function App() {
       setHomeworkMaps(maps);
       const qmaps = await loadQuizMaps();
       setQuizMaps(qmaps);
-      // 懶載入：成績不在開頁時全拉，進入各區／選卷時才讀
+      await loadSyllabus();
       setHomeworkScores({});
       setQuizScores({});
     } catch(e) { alert("載入失敗："+e.message); }
