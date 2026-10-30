@@ -356,6 +356,24 @@ async function deletePastpaperScore(studentId, paperId) {
   await db.collection("scores").doc(studentId).collection("pastpapers").doc(String(paperId)).delete();
 }
 
+async function loadStudentScoreTree(sid, subs) {
+  const out = {};
+  for (const sub of subs) {
+    out[sub] = {};
+    try {
+      const snap = await db.collection("scores").doc(sid).collection(sub).get();
+      snap.forEach(d => {
+        let data = d.data() || {};
+        if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
+          data = { ...data.value, updatedAt: data.updatedAt };
+        }
+        out[sub][d.id] = data;
+      });
+    } catch (e) { console.warn(sid, sub, e); }
+  }
+  return out;
+}
+
 async function loadAllPastpaperScoresForStudent(sid) {
   const out = {};
   try {
@@ -513,6 +531,10 @@ function Sidebar({ view, setView }) {
         <Item id="import" label="匯入 Sheet / 概況" />
         <Item id="idMap" label="學生 ID 對照補齊" />
         <Item id="pins" label="學生與 PIN" />
+      </div>
+      <div>
+        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">排行</div>
+        <Item id="ranking" label="群組戰力排行榜" />
       </div>
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">日常功課</div>
@@ -5594,6 +5616,252 @@ ${syllabus}
   );
 }
 
+
+function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMaps, examMaps, pastpaperMaps }) {
+  const [rankTab, setRankTab] = useState("composite");
+  const [leaderboardMonth, setLeaderboardMonth] = useState("all");
+  const [trees, setTrees] = useState({}); // sid -> { homeworks, quizzes, exams, pastpapers }
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!activeStudents.length) { setTrees({}); return; }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const next = {};
+        // 分批避免一次打爆
+        const ids = activeStudents.map(s => s.id);
+        const chunk = 8;
+        for (let i = 0; i < ids.length; i += chunk) {
+          const slice = ids.slice(i, i + chunk);
+          await Promise.all(slice.map(async sid => {
+            next[sid] = await loadStudentScoreTree(sid, ["homeworks", "quizzes", "exams", "pastpapers"]);
+          }));
+        }
+        if (!cancelled) setTrees(next);
+      } catch (e) { console.warn(e); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [activeStudents.map(s => s.id).join(",")]);
+
+  const scoreOf = (val, q) => {
+    if (val === undefined || val === null || String(val).trim() === "") return null;
+    if (q.type === "MC") {
+      if (!q.ans) return null;
+      const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+      return corrects.includes(String(val).trim().toUpperCase()) ? (q.max || 1) : 0;
+    }
+    const n = parseFloat(val);
+    return isNaN(n) ? 0 : n;
+  };
+
+  const calcCategoryPct = (sId, category) => {
+    const cohort = (activeStudents || []).find(x => x.id === sId)?.cohort;
+    const tree = trees[sId] || {};
+    let totalPct = 0, count = 0;
+
+    if (category === "homework") {
+      Object.keys(homeworkMaps || {}).forEach(hwId => {
+        const map = homeworkMaps[hwId];
+        if (!map?.questions?.length) return;
+        if (map.cohort && cohort && map.cohort !== cohort && map.cohort !== "" && map.cohort !== "所有學生") return;
+        const rec = tree.homeworks?.[hwId];
+        if (rec && rec.remakeStatus === "EXEMPT") return;
+        let max = 0;
+        map.questions.forEach(q => { max += q.max || 0; });
+        if (max <= 0) return;
+        if (!rec || !rec.scores || Object.keys(rec.scores).length === 0) {
+          totalPct += 0;
+          count++;
+          return;
+        }
+        let earned = 0;
+        map.questions.forEach(q => {
+          const sc = scoreOf(rec.scores[q.id], q);
+          earned += (sc === null ? 0 : sc);
+        });
+        totalPct += earned / max;
+        count++;
+      });
+    } else if (category === "quiz") {
+      Object.keys(quizMaps || {}).forEach(qid => {
+        const map = quizMaps[qid];
+        if (!map?.questions?.length) return;
+        if (map.cohort && cohort && map.cohort !== cohort && map.cohort !== "" && map.cohort !== "所有學生") return;
+        const rec = tree.quizzes?.[qid];
+        if (!rec) return;
+        let earned = 0, max = 0, has = false;
+        map.questions.forEach(q => {
+          max += q.max || 0;
+          const sc = scoreOf(rec[q.id], q);
+          if (sc === null) return;
+          has = true;
+          earned += sc;
+        });
+        if (has && max > 0) { totalPct += earned / max; count++; }
+      });
+    } else if (category === "exam") {
+      Object.keys(examMaps || {}).forEach(eid => {
+        const map = examMaps[eid];
+        if (!map?.questions?.length) return;
+        if (map.cohort && cohort && map.cohort !== cohort && map.cohort !== "" && map.cohort !== "所有學生") return;
+        const rec = tree.exams?.[eid];
+        if (!rec) return;
+        let earned = 0, max = 0, has = false;
+        map.questions.forEach(q => {
+          max += q.max || 0;
+          const sc = scoreOf(rec[q.id], q);
+          if (sc === null) return;
+          has = true;
+          earned += sc;
+        });
+        if (has && max > 0) { totalPct += earned / max; count++; }
+      });
+    }
+    return count > 0 ? totalPct / count : null;
+  };
+
+  const schoolRankings = useMemo(() => {
+    const peers = activeStudents || [];
+    const build = (cat) => peers.map(s => {
+      const pct = calcCategoryPct(s.id, cat);
+      return { student: s, pct, score: pct === null ? -1 : pct };
+    }).filter(r => r.pct !== null).sort((a, b) => b.pct - a.pct);
+
+    const BASE_W = { homework: 0.2, quiz: 0.3, exam: 0.5 };
+    const composite = peers.map(s => {
+      const hw = calcCategoryPct(s.id, "homework");
+      const qz = calcCategoryPct(s.id, "quiz");
+      const ex = calcCategoryPct(s.id, "exam");
+      const parts = [];
+      if (hw !== null) parts.push({ w: BASE_W.homework, v: hw });
+      if (qz !== null) parts.push({ w: BASE_W.quiz, v: qz });
+      if (ex !== null) parts.push({ w: BASE_W.exam, v: ex });
+      if (!parts.length) return { student: s, pct: null, detail: { hw, qz, ex } };
+      const wSum = parts.reduce((a, p) => a + p.w, 0);
+      const pct = parts.reduce((a, p) => a + (p.w / wSum) * p.v, 0);
+      return { student: s, pct, detail: { hw, qz, ex } };
+    }).filter(r => r.pct !== null).sort((a, b) => b.pct - a.pct);
+
+    return { homework: build("homework"), quiz: build("quiz"), exam: build("exam"), composite };
+  }, [activeStudents, trees, homeworkMaps, quizMaps, examMaps]);
+
+  const availableMonths = useMemo(() => {
+    const months = new Set();
+    (activeStudents || []).forEach(s => {
+      Object.values(trees[s.id]?.pastpapers || {}).forEach(r => {
+        if (r && r._submitMonth) months.add(r._submitMonth);
+      });
+    });
+    return Array.from(months).sort().reverse();
+  }, [activeStudents, trees]);
+
+  const pastpaperBoard = useMemo(() => {
+    return (activeStudents || []).map(s => {
+      const sScores = trees[s.id]?.pastpapers || {};
+      let totalQ = 0, earned = 0, max = 0;
+      Object.keys(sScores).forEach(pid => {
+        const rec = sScores[pid];
+        if (leaderboardMonth !== "all" && rec?._submitMonth !== leaderboardMonth) return;
+        const map = pastpaperMaps[pid];
+        if (!map?.questions) return;
+        map.questions.forEach(q => {
+          const val = rec[q.id];
+          if (val === undefined || val === null || String(val).trim() === "") return;
+          totalQ++;
+          max += q.max || 0;
+          const sc = scoreOf(val, q);
+          if (sc !== null) earned += sc;
+        });
+      });
+      const accuracy = max > 0 ? earned / max : 0;
+      return { student: s, totalQuestions: totalQ, accuracy, pct: accuracy };
+    }).filter(r => r.totalQuestions > 0).sort((a, b) => b.totalQuestions - a.totalQuestions || b.accuracy - a.accuracy);
+  }, [activeStudents, trees, pastpaperMaps, leaderboardMonth]);
+
+  const board = rankTab === "pastpaper" ? pastpaperBoard
+    : rankTab === "homework" ? schoolRankings.homework
+    : rankTab === "quiz" ? schoolRankings.quiz
+    : rankTab === "exam" ? schoolRankings.exam
+    : schoolRankings.composite;
+
+  const medal = (idx) => idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : String(idx + 1);
+
+  return (
+    <div className="space-y-4 max-w-4xl">
+      <div>
+        <h2 className="font-bold text-xl text-amber-700">群組戰力排行榜</h2>
+        <p className="text-sm text-slate-500">
+          目前群組：<b className="text-indigo-700">{currentCohort || "所有學生"}</b>（共 {(activeStudents || []).length} 人）
+          · 綜合 = 功課 20% + 小測 30% + 統考 50%（缺項自動重算權重）
+        </p>
+        {loading && <p className="text-xs text-slate-400 mt-1">載入全組成績中…</p>}
+      </div>
+
+      <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+        <div className="p-4 border-b flex flex-wrap gap-2 items-center">
+          {[
+            { id: "composite", label: "⭐ 綜合排名" },
+            { id: "homework", label: "📖 功課" },
+            { id: "quiz", label: "📝 小測" },
+            { id: "exam", label: "🏫 統考" },
+            { id: "pastpaper", label: "📚 Pastpaper" },
+          ].map(tab => (
+            <button key={tab.id} onClick={() => setRankTab(tab.id)}
+              className={`px-4 py-2 rounded-full text-sm font-black border transition ${
+                rankTab === tab.id
+                  ? (tab.id === "composite" ? "bg-amber-500 text-white border-amber-600 shadow" : "bg-indigo-600 text-white border-indigo-700 shadow")
+                  : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+              }`}>{tab.label}</button>
+          ))}
+          {rankTab === "pastpaper" && (
+            <select className="ml-auto border rounded-lg px-3 py-1.5 text-sm font-bold" value={leaderboardMonth} onChange={e => setLeaderboardMonth(e.target.value)}>
+              <option value="all">全部時間</option>
+              {availableMonths.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          )}
+        </div>
+        <div className="divide-y divide-slate-100">
+          {board.length === 0 ? (
+            <div className="p-12 text-center text-slate-400">{loading ? "載入中…" : "此榜暫無成績，請先輸入相關分數。"}</div>
+          ) : board.map((row, idx) => {
+            const isPP = rankTab === "pastpaper";
+            const isComp = rankTab === "composite";
+            return (
+              <div key={row.student.id} className={`p-4 flex items-center gap-4 ${idx < 3 ? "bg-amber-50/50" : "hover:bg-slate-50"}`}>
+                <div className={`w-10 text-center text-xl font-black ${idx < 3 ? "text-amber-500" : "text-slate-400"}`}>{medal(idx)}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold text-slate-800">
+                    {row.student.name}
+                    <span className="ml-2 text-xs font-semibold text-slate-400">{row.student.class}-{row.student.num}</span>
+                  </div>
+                  {isComp && row.detail && (
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      功課 {row.detail.hw == null ? "—" : Math.round(row.detail.hw * 100) + "%"}
+                      {" · "}小測 {row.detail.qz == null ? "—" : Math.round(row.detail.qz * 100) + "%"}
+                      {" · "}統考 {row.detail.ex == null ? "—" : Math.round(row.detail.ex * 100) + "%"}
+                    </div>
+                  )}
+                  {isPP && (
+                    <div className="text-xs text-slate-500 mt-0.5">已做 {row.totalQuestions} 題 · 正確率 {Math.round((row.accuracy || 0) * 100)}%</div>
+                  )}
+                </div>
+                <div className={`text-xl font-black ${idx < 3 ? "text-amber-600" : "text-slate-700"}`}>
+                  {isPP
+                    ? `${row.totalQuestions}題`
+                    : `${((row.pct || 0) * 100).toFixed(1)}%`}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = useState("import");
   const [students, setStudents] = useState([]);
@@ -5647,6 +5915,7 @@ function App() {
           <button className="text-sm text-indigo-600 font-bold" onClick={reload}>重新載入雲端</button>
           {loading && <span className="text-xs text-slate-400">載入中…</span>}
         </div>
+        {view==="ranking" && <ClassRankingView activeStudents={activeStudents} currentCohort={cohort} homeworkMaps={homeworkMaps} quizMaps={quizMaps} examMaps={examMaps} pastpaperMaps={pastpaperMaps} />}
         {view==="import" && <ImportView onReload={reload} />}
         {view==="idMap" && <IdMapView students={students} onReload={reload} />}
         {view==="pins" && <PinsView students={students} onReload={reload} />}
