@@ -908,6 +908,299 @@ function HomeDashboard({ student, maps, scores, makeup, cohortPeers, peerScores 
   );
 }
 
+
+function SchoolProgressView({ student, maps, scores, makeup }) {
+  const cohort = student.cohort || "";
+  const [section, setSection] = useState("hw"); // hw | quiz | exam
+
+  const hwRows = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.homework || {}).forEach(([id, m]) => {
+      if (!homeworkVisibleForStudent(m, id, cohort, scores.homeworks)) return;
+      const rec = scores.homeworks?.[id] || {};
+      const status = rec.remakeStatus || (!rec.scores || !Object.keys(rec.scores || {}).length ? "MISSING" : "PENDING");
+      const sc = scoreOfRec(m, rec);
+      const topics = (m.questions || []).map(q => q.topicDesc || q.topicId || "").filter(Boolean);
+      rows.push({
+        id, title: m.title || id, status, sc,
+        topics: Array.from(new Set(topics)).slice(0, 8),
+        remakeDate: rec.remakeDate || "",
+        remarks: rec.remarks || ""
+      });
+    });
+    const order = { MISSING: 0, ABSENT: 0, PENDING: 1, DONE: 2, PERFECT: 3, EXEMPT: 4 };
+    rows.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(a.id).localeCompare(String(b.id)));
+    return rows;
+  }, [maps.homework, scores.homeworks, cohort]);
+
+  const quizRows = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const sc = scoreOfRec(m, scores.quizzes?.[id]);
+      const mk = makeup?.quiz?.[id]?.[student.id];
+      rows.push({
+        id,
+        title: m.title || id,
+        sc,
+        mk: mk ? { status: mk.status || "PENDING", category: mk.category || "", remark: mk.remark || "" } : null
+      });
+    });
+    rows.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return rows;
+  }, [maps.quiz, scores.quizzes, makeup, cohort, student.id]);
+
+  const examRows = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.exam || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const st = examWeighted(m, scores.exams?.[id]);
+      const mk = makeup?.exam?.[id]?.[student.id];
+      let mkInfo = null;
+      if (mk) {
+        const topics = mk.topics || {};
+        const ids = Object.keys(topics);
+        const done = ids.filter(tid => topics[tid]?.done).length;
+        mkInfo = {
+          status: mk.status || "PENDING",
+          done, total: ids.length,
+          pct: ids.length ? Math.round((done / ids.length) * 100) : 0,
+          remark: mk.remark || mk.sessionNote || ""
+        };
+      }
+      rows.push({
+        id,
+        title: m.title || id,
+        st,
+        grade: st ? estimateDseLevel(st.weighted / 100) : null,
+        mk: mkInfo
+      });
+    });
+    rows.sort((a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true }));
+    return rows;
+  }, [maps.exam, scores.exams, makeup, cohort, student.id]);
+
+  const hwSummary = useMemo(() => {
+    const missing = hwRows.filter(r => r.status === "MISSING" || r.status === "ABSENT").length;
+    const pending = hwRows.filter(r => r.status === "PENDING").length;
+    const done = hwRows.filter(r => r.status === "DONE" || r.status === "PERFECT").length;
+    return { missing, pending, done, total: hwRows.length };
+  }, [hwRows]);
+
+  const statusStyle = (st) => {
+    if (st === "MISSING" || st === "ABSENT") return "bg-rose-500 text-white";
+    if (st === "PENDING") return "bg-amber-400 text-amber-950";
+    if (st === "PERFECT") return "bg-emerald-500 text-white";
+    if (st === "DONE") return "bg-sky-500 text-white";
+    if (st === "EXEMPT") return "bg-slate-300 text-slate-700";
+    return "bg-slate-200 text-slate-700";
+  };
+  const statusLabel = (st) => ({
+    MISSING: "欠交", ABSENT: "欠交", PENDING: "待改正", DONE: "已改正", PERFECT: "完美", EXEMPT: "豁免"
+  }[st] || st);
+
+  const tabs = [
+    { id: "hw", label: "功課", count: hwRows.length },
+    { id: "quiz", label: "小測", count: quizRows.length },
+    { id: "exam", label: "考試", count: examRows.length }
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-2xl font-black text-slate-800">校內進度</h2>
+        <p className="text-base text-slate-500 mt-1">功課 · 小測 · 考試詳情（只顯示與你相關的項目）</p>
+      </div>
+
+      {/* 總覽數字 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-white rounded-2xl border p-4 shadow-sm">
+          <div className="text-sm font-bold text-slate-500">功課總數</div>
+          <div className="text-3xl font-black text-indigo-700 mt-1">{hwSummary.total}</div>
+        </div>
+        <div className={`rounded-2xl border p-4 shadow-sm ${hwSummary.missing ? "bg-rose-50 border-rose-200" : "bg-white"}`}>
+          <div className="text-sm font-bold text-slate-500">欠交</div>
+          <div className={`text-3xl font-black mt-1 ${hwSummary.missing ? "text-rose-600" : "text-slate-400"}`}>{hwSummary.missing}</div>
+        </div>
+        <div className={`rounded-2xl border p-4 shadow-sm ${hwSummary.pending ? "bg-amber-50 border-amber-200" : "bg-white"}`}>
+          <div className="text-sm font-bold text-slate-500">待改正</div>
+          <div className={`text-3xl font-black mt-1 ${hwSummary.pending ? "text-amber-700" : "text-slate-400"}`}>{hwSummary.pending}</div>
+        </div>
+        <div className="bg-white rounded-2xl border p-4 shadow-sm">
+          <div className="text-sm font-bold text-slate-500">已改正</div>
+          <div className="text-3xl font-black text-emerald-600 mt-1">{hwSummary.done}</div>
+        </div>
+      </div>
+
+      {/* 分頁 */}
+      <div className="flex gap-2 flex-wrap">
+        {tabs.map(tb => (
+          <button key={tb.id} type="button" onClick={() => setSection(tb.id)}
+            className={`px-5 py-2.5 rounded-2xl text-base font-black border-2 transition ${section === tb.id ? "bg-indigo-600 text-white border-indigo-600 shadow" : "bg-white text-slate-600 border-slate-200 hover:border-indigo-300"}`}>
+            {tb.label} <span className="opacity-80">({tb.count})</span>
+          </button>
+        ))}
+      </div>
+
+      {/* 功課列表 */}
+      {section === "hw" && (
+        <div className="space-y-3">
+          {!hwRows.length && (
+            <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無相關功課</div>
+          )}
+          {hwRows.map(row => (
+            <div key={row.id} className={`bg-white rounded-2xl border shadow-sm p-5 ${row.status === "MISSING" || row.status === "ABSENT" ? "border-rose-300 ring-1 ring-rose-100" : row.status === "PENDING" ? "border-amber-200" : "border-slate-100"}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-lg font-black text-slate-800">{row.title}</div>
+                  <div className="text-sm text-slate-400 mono mt-0.5">{row.id}</div>
+                </div>
+                <span className={`text-sm font-black px-3 py-1.5 rounded-xl ${statusStyle(row.status)}`}>
+                  {statusLabel(row.status)}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-4 text-base">
+                {row.sc ? (
+                  <div>
+                    <span className="text-slate-500 font-bold">得分 </span>
+                    <span className="font-black text-slate-800 text-xl">{Math.round(row.sc.earned)}</span>
+                    <span className="text-slate-400 font-bold"> / {Math.round(row.sc.max)}</span>
+                    <span className={`ml-2 font-black ${row.sc.pct >= 0.6 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {Math.round(row.sc.pct * 100)}%
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-slate-400 font-bold">尚未有分數</div>
+                )}
+                {row.remakeDate && <div className="text-slate-500"><span className="font-bold">改正日</span> {row.remakeDate}</div>}
+              </div>
+              {!!row.topics.length && (
+                <div className="mt-3 text-sm text-slate-600 leading-relaxed">
+                  <span className="font-bold text-slate-500">內容：</span>{row.topics.join("、")}
+                </div>
+              )}
+              {row.remarks && (
+                <div className="mt-2 text-sm text-indigo-700 bg-indigo-50 rounded-xl px-3 py-2 font-semibold">{row.remarks}</div>
+              )}
+              {row.sc && row.sc.max > 0 && (
+                <div className="mt-3 h-3 rounded-full bg-slate-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${row.sc.pct >= 0.7 ? "bg-emerald-500" : row.sc.pct >= 0.5 ? "bg-amber-400" : "bg-rose-400"}`}
+                    style={{ width: Math.min(100, Math.round(row.sc.pct * 100)) + "%" }} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 小測列表 */}
+      {section === "quiz" && (
+        <div className="space-y-3">
+          {!quizRows.length && (
+            <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無小測</div>
+          )}
+          {quizRows.map(row => (
+            <div key={row.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+              <div className="flex flex-wrap justify-between gap-3 items-start">
+                <div>
+                  <div className="text-lg font-black text-slate-800">{row.title}</div>
+                  <div className="text-sm text-slate-400 mono">{row.id}</div>
+                </div>
+                {row.sc ? (
+                  <div className="text-right">
+                    <div className="text-2xl font-black text-slate-800">{Math.round(row.sc.earned)}
+                      <span className="text-base text-slate-400">/{Math.round(row.sc.max)}</span>
+                    </div>
+                    <div className={`text-base font-black ${row.sc.pct >= 0.6 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {Math.round(row.sc.pct * 100)}%
+                    </div>
+                  </div>
+                ) : (
+                  <span className="text-base font-black text-slate-400 bg-slate-100 px-3 py-1.5 rounded-xl">未測／無分</span>
+                )}
+              </div>
+              {row.sc && (
+                <div className="mt-3 h-3 rounded-full bg-slate-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${row.sc.pct >= 0.7 ? "bg-emerald-500" : row.sc.pct >= 0.5 ? "bg-amber-400" : "bg-rose-400"}`}
+                    style={{ width: Math.min(100, Math.round(row.sc.pct * 100)) + "%" }} />
+                </div>
+              )}
+              {row.mk && (
+                <div className={`mt-4 rounded-xl px-4 py-3 border text-base font-bold ${row.mk.status === "DONE" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-violet-50 border-violet-200 text-violet-900"}`}>
+                  <div className="flex justify-between gap-2">
+                    <span>補測 · {row.mk.category === "FAIL" ? "不合格" : "缺席／無測"}</span>
+                    <span>{row.mk.status === "DONE" ? "已完成 ✓" : "進行中"}</span>
+                  </div>
+                  {row.mk.remark && <div className="text-sm font-semibold text-slate-600 mt-1">{row.mk.remark}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 考試列表 */}
+      {section === "exam" && (
+        <div className="space-y-3">
+          {!examRows.length && (
+            <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無考試</div>
+          )}
+          {examRows.map(row => (
+            <div key={row.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+              <div className="flex flex-wrap justify-between gap-3 items-start">
+                <div>
+                  <div className="text-lg font-black text-slate-800">{row.title}</div>
+                  <div className="text-sm text-slate-400 mono">{row.id}</div>
+                </div>
+                {row.st ? (
+                  <div className="text-right">
+                    <div className="text-3xl font-black text-slate-800">{row.st.weighted.toFixed(1)}
+                      <span className="text-lg text-slate-400"> / 100</span>
+                    </div>
+                    <div className="text-sm text-slate-500 font-bold mt-0.5">
+                      卷面 {Math.round(row.st.total)}/{Math.round(row.st.max)}
+                    </div>
+                    {row.grade && (
+                      <span className={`inline-block mt-2 text-sm font-black px-2.5 py-1 rounded-lg border ${row.grade.color}`}>
+                        模擬 {row.grade.level}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-base font-black text-slate-400 bg-slate-100 px-3 py-1.5 rounded-xl">未入分</span>
+                )}
+              </div>
+              {row.st && (
+                <div className="mt-3 h-3 rounded-full bg-slate-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${row.st.weighted >= 70 ? "bg-emerald-500" : row.st.weighted >= 50 ? "bg-amber-400" : "bg-rose-400"}`}
+                    style={{ width: Math.min(100, Math.round(row.st.weighted)) + "%" }} />
+                </div>
+              )}
+              {row.mk && (
+                <div className={`mt-4 rounded-xl px-4 py-3 border ${row.mk.status === "DONE" ? "bg-emerald-50 border-emerald-200" : "bg-rose-50 border-rose-200"}`}>
+                  <div className="flex justify-between gap-2 text-base font-black">
+                    <span className="text-slate-800">補考進度</span>
+                    <span className={row.mk.status === "DONE" ? "text-emerald-700" : "text-rose-700"}>
+                      {row.mk.status === "DONE" ? "已完成 ✓" : `${row.mk.done}/${row.mk.total}`}
+                    </span>
+                  </div>
+                  {row.mk.total > 0 && (
+                    <div className="mt-2 h-3 rounded-full bg-white overflow-hidden border">
+                      <div className={`h-full rounded-full ${row.mk.pct >= 100 ? "bg-emerald-500" : "bg-rose-400"}`} style={{ width: row.mk.pct + "%" }} />
+                    </div>
+                  )}
+                  {row.mk.remark && <div className="text-sm text-slate-600 mt-2 font-semibold">{row.mk.remark}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function StudentShell({ student, onLogout }) {
   const [tab, setTab] = useState("home");
   const [loading, setLoading] = useState(true);
@@ -1028,10 +1321,13 @@ function StudentShell({ student, onLogout }) {
         {!loading && tab === "home" && (
           <HomeDashboard student={student} maps={maps} scores={scores} makeup={makeup} cohortPeers={cohortPeers} peerScores={peerScores} />
         )}
-        {!loading && tab !== "home" && (
+        {!loading && tab === "school" && (
+          <SchoolProgressView student={student} maps={maps} scores={scores} makeup={makeup} />
+        )}
+        {!loading && tab !== "home" && tab !== "school" && (
           <div className="bg-white rounded-3xl border p-12 text-center text-slate-400">
             <div className="text-lg font-bold text-slate-600 mb-2">{tabs.find(x => x.id === tab)?.label}</div>
-            下一批會接上此分頁（校內進度 / 歷屆試題 / AI 補底 / 英雄榜）
+            下一批會接上此分頁（歷屆試題 / AI 補底 / 英雄榜）
           </div>
         )}
       </main>
