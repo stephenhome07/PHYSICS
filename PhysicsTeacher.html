@@ -659,6 +659,7 @@ function Sidebar({ view, setView, cohort, setCohort, cohorts, reload, loading })
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">考試</div>
         <Item id="examInput" label="考試成績輸入及分析" />
+        <Item id="examMakeup" label="補考專區" />
         <Item id="examSummary" label="考試分數表" />
         <Item id="examSettings" label="考試內容設定" />
       </div>
@@ -3329,16 +3330,6 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
   const inputRefs = useRef({});
   const timer = useRef(null);
 
-  // 補考專區
-  const [makeup, setMakeup] = useState({}); // sid -> { category, remark, topics: {topicId: {done, label, pct}} }
-  const [makeupFocus, setMakeupFocus] = useState(""); // selected student in makeup panel
-  const [mkMc, setMkMc] = useState(10);
-  const [mkLq, setMkLq] = useState(0);
-  const [mkLevel, setMkLevel] = useState("中");
-  const [makeupSaving, setMakeupSaving] = useState(false);
-  // Prompt 用：從已納入補底課題中再選子集
-  const [promptTopicIds, setPromptTopicIds] = useState([]);
-
   const [aiMc, setAiMc] = useState(5);
   const [aiLq, setAiLq] = useState(3);
   const [aiLevel, setAiLevel] = useState("中");
@@ -3352,15 +3343,6 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
   const activeIdsKey = useMemo(() => activeStudents.map(s => s.id).join(","), [activeStudents]);
   const [loadInfo, setLoadInfo] = useState("");
 
-  // 切換補考學生時：Prompt 預設勾「已納入且未完成」的課題
-  useEffect(() => {
-    if (!makeupFocus || !makeup[makeupFocus]) { setPromptTopicIds([]); return; }
-    const topics = makeup[makeupFocus].topics || {};
-    const pending = Object.keys(topics).filter(tid => !topics[tid]?.done);
-    setPromptTopicIds(pending.length ? pending : Object.keys(topics));
-  }, [makeupFocus]);
-
-
   useEffect(() => {
     if (!selectedExam || !activeStudents.length) return;
     let cancelled = false;
@@ -3369,18 +3351,14 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
       setLoadInfo("");
       try {
         const part = await loadExamScoresForExam(activeStudents.map(s => s.id), selectedExam);
-        let mk = {};
-        try { mk = await loadExamMakeup(selectedExam); } catch (e) { console.warn("makeup", e); }
         if (cancelled) return;
         const meta = part.__meta || {};
         delete part.__meta;
         setExamScores(prev => {
           const next = { ...prev };
-          // 只寫入「有讀到」的文件；讀不到時保留畫面既有資料，避免一次失敗清空全班
           Object.keys(part).forEach(sid => {
             next[sid] = { ...(next[sid] || {}), ...(part[sid] || {}) };
           });
-          // 若成功讀完且確認該生無此卷文件，才清掉（errors==0 時才做「明確沒有」清理）
           if ((meta.errors || 0) === 0) {
             activeStudents.forEach(s => {
               if (!part[s.id] || !part[s.id][selectedExam]) {
@@ -3394,7 +3372,6 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
           }
           return next;
         });
-        setMakeup(mk || {});
         setLoadInfo(`讀取 ${meta.found || 0}/${meta.tried || 0} 人有此卷成績` + (meta.errors ? `（${meta.errors} 次讀取失敗）` : ""));
       } catch (e) {
         console.warn(e);
@@ -3501,16 +3478,6 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
         return next;
       });
     } catch (e) { alert(e.message); }
-  };
-
-
-  const persistExamMakeup = async (nextMap) => {
-    setMakeupSaving(true);
-    try {
-      await saveExamMakeup(selectedExam, nextMap);
-      setMakeup(nextMap);
-    } catch (e) { alert(e.message); }
-    setMakeupSaving(false);
   };
 
 
@@ -3875,360 +3842,449 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
           </>
         )}
       </div>
+    </div>
+  );
+}
 
-      {/* 補考專區 */}
-      <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <div className="flex flex-wrap justify-between gap-3 items-start">
-          <div>
-            <h3 className="font-bold text-lg text-purple-900">補考專區 · {selectedExam}</h3>
-            <p className="text-xs text-slate-500">可手動加入任何學生，或一鍵加入建議名單。勾選難點 → 標完成；進度 100% 才算完成。</p>
-          </div>
-          <div className="flex flex-wrap gap-2 items-center">
-            <select id="exam-makeup-add" className="border-2 rounded-lg px-2 py-2 text-sm font-semibold min-w-[160px]"
-              defaultValue=""
-              onChange={e => {
-                const sid = e.target.value;
-                e.target.value = "";
-                if (!sid || makeup[sid]) return;
-                const st = calcStudent(sid);
-                const entry = { category: !st ? "ABSENT" : (st.weighted < 50 ? "FAIL" : "MANUAL"), remark: "", topics: {} };
-                const rec = examScores[sid]?.[selectedExam] || {};
-                const topicBag = {};
-                qList.forEach(q => {
-                  if (!q.topicId) return;
-                  const raw = rec[q.id];
-                  if (raw === undefined || raw === null || String(raw).trim() === "") return;
-                  const sc = quizQuestionScore(q, raw);
-                  if (sc == null) return;
-                  if (!topicBag[q.topicId]) topicBag[q.topicId] = { score: 0, max: 0, desc: q.topicDesc || "" };
-                  topicBag[q.topicId].score += sc;
-                  topicBag[q.topicId].max += (q.max || 1);
-                  topicBag[q.topicId].desc = q.topicDesc || topicBag[q.topicId].desc || "";
-                });
-                Object.entries(topicBag).forEach(([tid, v]) => {
-                  const pct = v.max > 0 ? (v.score / v.max) * 100 : 0;
-                  if (pct < 60) entry.topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct) };
-                });
-                if (!Object.keys(entry.topics).length) {
-                  qStats.filter(q => q.pct != null && q.pct < 50 && q.topicId).forEach(q => {
-                    if (!entry.topics[q.topicId]) entry.topics[q.topicId] = { done: false, label: q.topicDesc || q.topicId, pct: Math.round(q.pct) };
-                  });
-                }
-                const next = { ...makeup, [sid]: entry };
-                persistExamMakeup(next);
-                setMakeupFocus(sid);
-              }}>
-              <option value="">＋ 手動加入學生…</option>
-              {activeStudents.filter(s => !makeup[s.id]).map(s => (
-                <option key={s.id} value={s.id}>{s.class}-{s.num} {s.name}</option>
-              ))}
-            </select>
-            <button className="text-sm font-black px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white shadow border-2 border-amber-600"
-              onClick={() => {
-                const next = { ...makeup };
-                activeStudents.forEach(s => {
-                  const st = calcStudent(s.id);
-                  if (!st) {
-                    if (!next[s.id]) next[s.id] = { category: "ABSENT", remark: "", topics: {} };
-                  } else if (st.weighted < 50) {
-                    if (!next[s.id]) next[s.id] = { category: "FAIL", remark: "", topics: {} };
-                  }
-                });
-                Object.keys(next).forEach(sid => {
-                  if (!next[sid].topics) next[sid].topics = {};
-                  const rec = examScores[sid]?.[selectedExam] || {};
-                  const topicBag = {};
-                  qList.forEach(q => {
-                    const raw = rec[q.id];
-                    if (!q.topicId) return;
-                    if (raw === undefined || raw === null || String(raw).trim() === "") return;
-                    const sc = quizQuestionScore(q, raw);
-                    if (sc == null) return;
-                    if (!topicBag[q.topicId]) topicBag[q.topicId] = { score: 0, max: 0, desc: q.topicDesc || "" };
-                    topicBag[q.topicId].score += sc;
-                    topicBag[q.topicId].max += (q.max || 1);
-                    topicBag[q.topicId].desc = q.topicDesc || topicBag[q.topicId].desc || "";
-                  });
-                  Object.entries(topicBag).forEach(([tid, v]) => {
-                    const pct = v.max > 0 ? (v.score / v.max) * 100 : 0;
-                    if (pct < 60 && !next[sid].topics[tid]) {
-                      next[sid].topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct) };
-                    }
-                  });
-                  if (next[sid].category === "ABSENT" && !Object.keys(next[sid].topics).length) {
-                    qStats.filter(q => q.pct != null && q.pct < 50 && q.topicId).forEach(q => {
-                      if (!next[sid].topics[q.topicId]) {
-                        next[sid].topics[q.topicId] = { done: false, label: q.topicDesc || q.topicId, pct: Math.round(q.pct) };
-                      }
-                    });
-                  }
-                });
-                persistExamMakeup(next);
-              }}>
-              ＋ 加入建議名單（無測 + 不合格&lt;50%）
-            </button>
-          </div>
-        </div>
 
-        <div className="grid lg:grid-cols-5 gap-4">
-          <div className="lg:col-span-2 border rounded-xl p-3 space-y-2 max-h-[420px] overflow-auto">
-            <div className="text-sm font-bold text-slate-600">補考名單</div>
-            {Object.keys(makeup).length === 0 && <p className="text-xs text-slate-400">尚未加入學生</p>}
-            {Object.keys(makeup).map(sid => {
-              const s = activeStudents.find(x => x.id === sid);
-              const m = makeup[sid] || {};
-              const topics = m.topics || {};
-              const ids = Object.keys(topics);
-              const doneN = ids.filter(id => topics[id]?.done).length;
-              const pctProg = ids.length ? Math.round((doneN / ids.length) * 100) : 0;
-              const complete = ids.length > 0 && doneN === ids.length;
-              return (
-                <button key={sid} onClick={() => setMakeupFocus(sid)}
-                  className={`w-full text-left rounded-xl border p-3 ${makeupFocus===sid?"border-purple-400 bg-purple-50":"border-slate-100 hover:bg-slate-50"}`}>
-                  <div className="flex justify-between items-center gap-2">
-                    <span className="font-bold text-sm">{s ? `${s.class}-${s.num} ${s.name}` : sid}</span>
-                    <span className={`text-[10px] font-black px-1.5 py-0.5 rounded ${complete?"bg-emerald-100 text-emerald-700":"bg-amber-100 text-amber-800"}`}>
-                      {complete ? "已完成" : "進行中"}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex items-center gap-2">
-                    <div className="flex-1 h-2 rounded-full bg-slate-100 overflow-hidden">
-                      <div className={`h-full ${complete?"bg-emerald-500":"bg-purple-500"}`} style={{width: pctProg+"%"}} />
-                    </div>
-                    <span className="text-[11px] font-bold text-slate-600">{doneN}/{ids.length} ({pctProg}%)</span>
-                  </div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">{m.category==="FAIL"?"不合格":"無測／缺席"}</div>
-                </button>
-              );
-            })}
-          </div>
+function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, currentCohort }) {
+  const examIds = useMemo(
+    () => Object.keys(examMaps || {}).filter(id => examVisibleForCohort(examMaps[id], currentCohort)).sort(),
+    [examMaps, currentCohort]
+  );
+  const [selectedExam, setSelectedExam] = useState(examIds[0] || "");
+  const [makeup, setMakeup] = useState({});
+  const [focus, setFocus] = useState("");
+  const [filter, setFilter] = useState("active"); // active | done | all
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [mkMc, setMkMc] = useState(8);
+  const [mkLq, setMkLq] = useState(1);
+  const [mkLevel, setMkLevel] = useState("淺");
+  const [promptTopicIds, setPromptTopicIds] = useState([]);
 
-          <div className="lg:col-span-3 border rounded-xl p-4 space-y-3">
-            {!makeupFocus || !makeup[makeupFocus] ? (
-              <p className="text-slate-400 text-sm p-6 text-center">在左側選擇一位補考學生</p>
-            ) : (() => {
-              const sid = makeupFocus;
-              const s = activeStudents.find(x => x.id === sid);
-              const m = makeup[sid] || {};
-              const topics = m.topics || {};
-              const topicIds = Object.keys(topics);
-              const doneN = topicIds.filter(id => topics[id]?.done).length;
-              const pctProg = topicIds.length ? Math.round((doneN / topicIds.length) * 100) : 0;
-              const st = calcStudent(sid);
+  useEffect(() => {
+    if (examIds.length && !examIds.includes(selectedExam)) setSelectedExam(examIds[0] || "");
+  }, [examIds]);
 
-              const toggleTopicDone = (tid) => {
-                const next = {
-                  ...makeup,
-                  [sid]: {
-                    ...m,
-                    topics: {
-                      ...topics,
-                      [tid]: { ...topics[tid], done: !topics[tid]?.done }
-                    }
-                  }
-                };
-                // 100% → status DONE
-                const t2 = next[sid].topics;
-                const ids = Object.keys(t2);
-                const allDone = ids.length > 0 && ids.every(id => t2[id].done);
-                next[sid].status = allDone ? "DONE" : "PENDING";
-                persistExamMakeup(next);
-              };
+  const map = examMaps[selectedExam];
+  const qList = map?.questions || [];
+  const activeIdsKey = useMemo(() => activeStudents.map(s => s.id).join(","), [activeStudents]);
 
-              const toggleTopicInclude = (tid, label, pct) => {
-                const nextTopics = { ...topics };
-                if (nextTopics[tid]) delete nextTopics[tid];
-                else nextTopics[tid] = { done: false, label: label || tid, pct: pct ?? null };
-                const next = { ...makeup, [sid]: { ...m, topics: nextTopics } };
-                const ids = Object.keys(nextTopics);
-                const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
-                next[sid].status = allDone ? "DONE" : "PENDING";
-                persistExamMakeup(next);
-              };
+  useEffect(() => {
+    if (!selectedExam || !activeStudents.length) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const part = await loadExamScoresForExam(activeStudents.map(s => s.id), selectedExam);
+        let mk = {};
+        try { mk = await loadExamMakeup(selectedExam); } catch (e) {}
+        if (cancelled) return;
+        if (part.__meta) delete part.__meta;
+        setExamScores(prev => {
+          const next = { ...prev };
+          Object.keys(part).forEach(sid => {
+            next[sid] = { ...(next[sid] || {}), ...(part[sid] || {}) };
+          });
+          return next;
+        });
+        setMakeup(mk || {});
+        setFocus("");
+      } catch (e) { console.warn(e); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedExam, activeIdsKey]);
 
-              // 可選難點池：全班弱 topic + 個人失分 topic
-              const pool = {};
-              qStats.forEach(q => {
-                if (!q.topicId) return;
-                if (!pool[q.topicId]) pool[q.topicId] = { topicId: q.topicId, label: q.topicDesc || q.topicId, pct: q.pct };
-                else if (q.pct != null && (pool[q.topicId].pct == null || q.pct < pool[q.topicId].pct)) {
-                  pool[q.topicId].pct = q.pct;
-                  pool[q.topicId].label = q.topicDesc || pool[q.topicId].label;
-                }
-              });
+  useEffect(() => {
+    if (!focus || !makeup[focus]) { setPromptTopicIds([]); return; }
+    const topics = makeup[focus].topics || {};
+    const pending = Object.keys(topics).filter(tid => !topics[tid]?.done);
+    setPromptTopicIds(pending.length ? pending : Object.keys(topics));
+  }, [focus]);
 
-              const buildMakeupPrompt = () => {
-                const selected = (promptTopicIds.length ? promptTopicIds : topicIds).filter(id => topics[id]);
-                // 該生在此考試中、對應已選 topic 的失分／弱項題
-                const rec = examScores[sid]?.[selectedExam] || {};
-                const weakQLines = [];
-                qList.forEach(q => {
-                  if (!selected.includes(q.topicId)) return;
-                  const raw = rec[q.id];
-                  if (raw === undefined || raw === null || String(raw).trim() === "") {
-                    weakQLines.push(`- [${q.id}] topicId: ${q.topicId || "（無）"}｜${q.topicDesc || ""}｜未作答`);
-                    return;
-                  }
-                  const sc = quizQuestionScore(q, raw);
-                  const max = q.max || 1;
-                  if (sc == null) return;
-                  if (sc < max * 0.6) {
-                    const ansPart = q.type === "MC" ? `，學生答 ${String(raw).toUpperCase()}${q.ans ? "（正解 "+q.ans+"）" : ""}` : `，得分 ${sc}/${max}`;
-                    weakQLines.push(`- [${q.id}] topicId: ${q.topicId || "（無）"}｜${q.topicDesc || ""}${ansPart}`);
-                  }
-                });
-                const topicLines = selected.map(id => {
-                  const info = SYLLABUS_TOPICS[id];
-                  const name = typeof info === "object" && info ? (info.topic || info.name || "") : (info || "");
-                  const desc = typeof info === "object" && info ? (info.desc || "") : "";
-                  const tt = topics[id] || {};
-                  return `- topicId: ${id}｜課題：${name || tt.label || ""}｜掌握約 ${tt.pct != null ? tt.pct + "%" : "—"}｜${tt.done ? "已完成" : "待補"}${desc ? "\n  學習要求：" + desc : ""}`;
-                }).join("\n") || "- （請先在下方 Prompt 課題中勾選）";
-                const syllabus = getSyllabusTableText(selected);
-                return `【身份】你是香港 DSE 物理科老師。
+  const calcStudent = (sid) => {
+    if (!map) return null;
+    const rec = examScores[sid]?.[selectedExam] || {};
+    let mcScore = 0, mcMax = 0, lqScore = 0, lqMax = 0, any = false;
+    qList.forEach(q => {
+      const max = q.max || 1;
+      if (q.type === "MC") mcMax += max; else lqMax += max;
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      any = true;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      if (q.type === "MC") mcScore += sc; else lqScore += sc;
+    });
+    if (!any) return null;
+    const totalMax = mcMax + lqMax;
+    const total = mcScore + lqScore;
+    // weighted like exam input: MC 35 LQ 65 if both exist
+    let weighted = totalMax > 0 ? (total / totalMax) * 100 : 0;
+    if (mcMax > 0 && lqMax > 0) {
+      weighted = ((mcScore / mcMax) * 0.35 + (lqScore / lqMax) * 0.65) * 100;
+    }
+    return { total, max: totalMax, weighted, mcScore, mcMax, lqScore, lqMax };
+  };
 
-【任務】為補考學生 ${s ? `${s.class}-${s.num} ${s.name}` : sid} 生成【互動式小測驗】，必須在 AI **Canvas** 模式中逐題作答、即時回饋。
+  const persist = async (nextMap) => {
+    setSaving(true);
+    try {
+      await saveExamMakeup(selectedExam, nextMap);
+      setMakeup(nextMap);
+    } catch (e) { alert(e.message); }
+    setSaving(false);
+  };
 
-【考試】${map?.title || selectedExam}（${selectedExam}）
-【學生成績】${st ? `卷面 ${st.total}/${st.max}，加權 ${st.weighted.toFixed(1)}` : "無測／缺席"}
-【備註】${m.remark || "無"}
+  const buildWeakTopicsForStudent = (sid) => {
+    const topics = {};
+    const rec = examScores[sid]?.[selectedExam] || {};
+    const topicBag = {};
+    qList.forEach(q => {
+      if (!q.topicId) return;
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      if (!topicBag[q.topicId]) topicBag[q.topicId] = { score: 0, max: 0, desc: q.topicDesc || "", qs: [] };
+      topicBag[q.topicId].score += sc;
+      topicBag[q.topicId].max += (q.max || 1);
+      topicBag[q.topicId].desc = q.topicDesc || topicBag[q.topicId].desc;
+      topicBag[q.topicId].qs.push(q.id);
+    });
+    Object.entries(topicBag).forEach(([tid, v]) => {
+      const pct = v.max > 0 ? (v.score / v.max) * 100 : 0;
+      if (pct < 60) {
+        topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct), qs: v.qs };
+      }
+    });
+    return topics;
+  };
 
-【本次 Prompt 要針對的課題】（從補底清單中再選，含 topicId）
-${topicLines}
+  const addStudent = (sid, category) => {
+    if (!sid || makeup[sid]) return;
+    const st = calcStudent(sid);
+    const entry = {
+      category: category || (!st ? "ABSENT" : (st.weighted < 50 ? "FAIL" : "LOW")),
+      remark: "",
+      sessionNote: "",
+      topics: buildWeakTopicsForStudent(sid),
+      status: "PENDING",
+      updatedAt: new Date().toISOString()
+    };
+    const next = { ...makeup, [sid]: entry };
+    persist(next);
+    setFocus(sid);
+  };
 
-【該生在此考試中的相關弱項題】（題號、描述、作答情況）
-${weakQLines.length ? weakQLines.join("\n") : "- （所選課題下未找到明顯失分題，請按課題概念出鞏固題）"}
+  const addSuggested = () => {
+    const next = { ...makeup };
+    activeStudents.forEach(s => {
+      const st = calcStudent(s.id);
+      if (!st || st.weighted < 50) {
+        if (!next[s.id]) {
+          next[s.id] = {
+            category: !st ? "ABSENT" : "FAIL",
+            remark: "",
+            sessionNote: "",
+            topics: buildWeakTopicsForStudent(s.id),
+            status: "PENDING",
+            updatedAt: new Date().toISOString()
+          };
+        }
+      }
+    });
+    persist(next);
+  };
+
+  const removeStudent = (sid) => {
+    if (!confirm("從補考名單移除？進度會刪除。")) return;
+    const next = { ...makeup };
+    delete next[sid];
+    persist(next);
+    if (focus === sid) setFocus("");
+  };
+
+  const listIds = Object.keys(makeup).filter(sid => {
+    const m = makeup[sid] || {};
+    const topics = m.topics || {};
+    const ids = Object.keys(topics);
+    const done = ids.length > 0 && ids.every(id => topics[id]?.done);
+    if (filter === "active") return !done;
+    if (filter === "done") return done;
+    return true;
+  }).sort((a, b) => {
+    const prog = (sid) => {
+      const t = makeup[sid]?.topics || {};
+      const ids = Object.keys(t);
+      if (!ids.length) return 0;
+      return ids.filter(id => t[id]?.done).length / ids.length;
+    };
+    return prog(a) - prog(b);
+  });
+
+  const buildPrompt = (sid) => {
+    const m = makeup[sid] || {};
+    const s = activeStudents.find(x => x.id === sid);
+    const name = s ? `${s.class}-${s.num} ${s.name}` : sid;
+    const topics = m.topics || {};
+    const chosen = (promptTopicIds.length ? promptTopicIds : Object.keys(topics).filter(tid => !topics[tid]?.done))
+      .filter(tid => topics[tid]);
+    if (!chosen.length) return "請先勾選今次要補的課題。";
+    const lines = chosen.map(tid => {
+      const t = topics[tid];
+      return `- [${tid}] ${t.label || ""}（考試得分率約 ${t.pct != null ? t.pct + "%" : "—"}；狀態：${t.done ? "已完成" : "待補"}）`;
+    }).join("\n");
+    const syllabus = getSyllabusTableText(chosen);
+    return `【身份】你是香港 DSE 物理科老師，正在為學生進行【分日補底／補考練習】。
+
+【學生】${name}
+【考試】${map?.title || selectedExam}
+【今次只處理以下課題】（其餘日後再補，不要一次出完全部）
+${lines}
 
 【課程大綱參考】
 ${syllabus}
 
 【基本設定】
-- 繁體中文；難度：${mkLevel}
+- 語言：繁體中文
+- 難度：${mkLevel}
 - MC：${mkMc} 題；LQ：${mkLq} 題
-- ★ Canvas 互動式：先出題，待學生回答再評；勿一次公開全部答案
+- ★ 必須用 AI **Canvas（畫布）** 做成【互動式小測驗】：逐題顯示、學生作答後再給對錯與簡短解說
 
 【要求】
-1. 緊扣上列弱項題與 topicId，由淺入深。
-2. 每題標明 topicId；MC 附 4 選項，答錯指出迷思。
+1. 緊貼上述 topicId 與失分點，由淺入深，適合能力一般、時間有限的學生。
+2. MC 附 4 選項；答錯指出迷思。
 3. 不要一次公開全部答案。
-4. 開頭一句鼓勵。`;
-              };
+4. 開頭用一句話說明這是今日補底練習，語氣鼓勵、簡短。
+5. 每題標明 topicId。`;
+  };
 
-              return (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap justify-between gap-2 items-start">
-                    <div>
-                      <div className="font-bold text-lg">{s ? `${s.class} ${s.name}` : sid}</div>
-                      <div className="text-xs text-slate-500">
-                        {st ? `試卷得分 ${st.total}/${st.max}` : "無成績"} · 補底進度 {doneN}/{topicIds.length} ({pctProg}%)
-                      </div>
-                      <div className="mt-1 w-48 h-2 rounded-full bg-slate-100 overflow-hidden">
-                        <div className="h-full bg-purple-500" style={{width: pctProg+"%"}} />
-                      </div>
-                    </div>
-                    <button className="text-xs font-bold text-rose-600" onClick={() => {
-                      const next = { ...makeup }; delete next[sid];
-                      persistExamMakeup(next);
-                      setMakeupFocus("");
-                    }}>移出名單</button>
+  if (!examIds.length) {
+    return <div className="p-8 text-slate-400">此群組尚無考試。請先在「考試內容設定」建立。</div>;
+  }
+
+  const focusM = focus ? makeup[focus] : null;
+  const focusS = focus ? activeStudents.find(x => x.id === focus) : null;
+  const focusTopics = focusM?.topics || {};
+  const focusIds = Object.keys(focusTopics);
+  const focusDone = focusIds.filter(id => focusTopics[id]?.done).length;
+  const focusPct = focusIds.length ? Math.round((focusDone / focusIds.length) * 100) : 0;
+  const focusComplete = focusIds.length > 0 && focusDone === focusIds.length;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap justify-between gap-3 items-start">
+        <div>
+          <h2 className="font-bold text-xl text-purple-800">補考專區</h2>
+          <p className="text-sm text-slate-500">適合放學／Lunch 分日補底：加入低分同學 → 按弱點出題 → 完成課題剔低 → 全部完成即 OK。</p>
+        </div>
+        <select className="border-2 rounded-xl px-3 py-2 text-sm font-bold min-w-[220px]" value={selectedExam}
+          onChange={e => { setSelectedExam(e.target.value); setFocus(""); }}>
+          {examIds.map(id => <option key={id} value={id}>{id} — {examMaps[id]?.title || id}</option>)}
+        </select>
+      </div>
+
+      {loading && <div className="text-xs text-slate-400">載入考試成績與補考名單…</div>}
+      {saving && <div className="text-xs text-purple-600">儲存中…</div>}
+
+      <div className="flex flex-wrap gap-2 items-center">
+        <select className="border rounded-lg px-2 py-2 text-sm" defaultValue=""
+          onChange={e => { const v = e.target.value; e.target.value = ""; if (v) addStudent(v); }}>
+          <option value="">＋ 手動加入學生…</option>
+          {activeStudents.filter(s => !makeup[s.id]).map(s => {
+            const st = calcStudent(s.id);
+            return (
+              <option key={s.id} value={s.id}>
+                {s.class}-{s.num} {s.name}{st ? `（${Math.round(st.weighted)}%）` : "（無測）"}
+              </option>
+            );
+          })}
+        </select>
+        <button className="bg-amber-500 hover:bg-amber-600 text-white font-bold text-sm px-4 py-2 rounded-xl" onClick={addSuggested}>
+          ＋ 加入建議名單（無測 + &lt;50%）
+        </button>
+        <div className="ml-auto flex gap-1">
+          {[["active","進行中"],["done","已完成"],["all","全部"]].map(([k,lab]) => (
+            <button key={k} onClick={() => setFilter(k)}
+              className={`text-xs font-bold px-3 py-1.5 rounded-full border ${filter===k?"bg-purple-600 text-white border-purple-700":"bg-white text-slate-600"}`}>
+              {lab}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-3 max-h-[70vh] overflow-auto space-y-2">
+          <div className="text-sm font-bold text-slate-600 px-1">補考名單（{listIds.length}）</div>
+          {!listIds.length && <p className="text-xs text-slate-400 p-3">尚未有學生。可手動加入或一鍵建議名單。</p>}
+          {listIds.map(sid => {
+            const s = activeStudents.find(x => x.id === sid);
+            const m = makeup[sid] || {};
+            const topics = m.topics || {};
+            const ids = Object.keys(topics);
+            const doneN = ids.filter(id => topics[id]?.done).length;
+            const pct = ids.length ? Math.round((doneN / ids.length) * 100) : 0;
+            const complete = ids.length > 0 && doneN === ids.length;
+            return (
+              <button key={sid} type="button" onClick={() => setFocus(sid)}
+                className={`w-full text-left rounded-xl border p-3 ${focus===sid?"border-purple-400 bg-purple-50 ring-1 ring-purple-200":"border-slate-100 hover:bg-slate-50"}`}>
+                <div className="flex justify-between gap-2">
+                  <span className="font-bold text-sm">{s ? `${s.class}-${s.num} ${s.name}` : sid}</span>
+                  <span className={`text-[10px] font-black px-1.5 py-0.5 rounded ${complete?"bg-emerald-100 text-emerald-700":"bg-amber-100 text-amber-800"}`}>
+                    {complete ? "已完成" : "進行中"}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-center gap-2">
+                  <div className="flex-1 h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div className={`h-full ${complete?"bg-emerald-500":"bg-purple-500"}`} style={{width: pct+"%"}} />
                   </div>
+                  <span className="text-[11px] font-bold">{doneN}/{ids.length}</span>
+                </div>
+                {(m.sessionNote || m.remark) && (
+                  <div className="text-[11px] text-slate-500 mt-1 truncate">📝 {m.sessionNote || m.remark}</div>
+                )}
+                <div className="text-[10px] text-slate-400 mt-0.5">
+                  {m.category==="FAIL"?"不合格":m.category==="ABSENT"?"無測／缺席":m.category==="LOW"?"低分":"手動"}
+                </div>
+              </button>
+            );
+          })}
+        </div>
 
-                  <label className="text-xs font-bold text-slate-500 block">備註
-                    <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" placeholder="例：只完成熱傳導，放學再來"
-                      value={m.remark || ""}
-                      onChange={e => {
-                        const next = { ...makeup, [sid]: { ...m, remark: e.target.value } };
-                        setMakeup(next);
-                        if (window.__exMkTimer) clearTimeout(window.__exMkTimer);
-                        window.__exMkTimer = setTimeout(() => persistExamMakeup(next), 500);
-                      }} />
-                  </label>
-
-                  <div>
-                    <div className="text-sm font-bold text-slate-700 mb-2">補底課題（勾選納入／再點「完成」標記）</div>
-                    <div className="flex flex-wrap gap-2">
-                      {Object.values(pool).sort((a,b)=>(a.pct??999)-(b.pct??999)).map(tp => {
-                        const on = !!topics[tp.topicId];
-                        const done = on && topics[tp.topicId].done;
-                        return (
-                          <div key={tp.topicId}
-                            className={`rounded-xl border-2 px-2 py-1.5 text-xs font-bold flex items-center gap-1.5 ${done?"border-emerald-400 bg-emerald-50 text-emerald-800":on?"border-purple-400 bg-purple-50 text-purple-900":"border-slate-200 bg-white text-slate-600"}`}>
-                            <input type="checkbox" checked={on} onChange={() => toggleTopicInclude(tp.topicId, tp.label, tp.pct != null ? Math.round(tp.pct) : null)} />
-                            <span className="mono">{tp.topicId}</span>
-                            <span className="truncate max-w-[100px]">{tp.label}</span>
-                            <span className={`px-1 rounded ${tp.pct!=null&&tp.pct<40?"bg-rose-100 text-rose-700":"bg-slate-100"}`}>{tp.pct!=null?Math.round(tp.pct)+"%":"—"}</span>
-                            {on && (
-                              <button type="button" className={`ml-1 px-1.5 py-0.5 rounded text-[10px] ${done?"bg-emerald-600 text-white":"bg-slate-200"}`}
-                                onClick={() => toggleTopicDone(tp.topicId)}>
-                                {done ? "✓已完成" : "標完成"}
-                              </button>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {pctProg < 100 && topicIds.length > 0 && (
-                      <p className="text-[11px] text-amber-700 mt-2 font-semibold">需完成全部已選課題（{doneN}/{topicIds.length}）才算補底 100%。</p>
-                    )}
-                    {pctProg === 100 && topicIds.length > 0 && (
-                      <p className="text-[11px] text-emerald-700 mt-2 font-bold">已達補底 100%，可標記為完成。</p>
-                    )}
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4 space-y-4">
+          {!focus || !focusM ? (
+            <p className="text-slate-400 text-center p-10">在左側選一位學生開始今日補底</p>
+          ) : (
+            <>
+              <div className="flex flex-wrap justify-between gap-2 items-start">
+                <div>
+                  <div className="font-black text-lg text-purple-900">
+                    {focusS ? `${focusS.class}-${focusS.num} ${focusS.name}` : focus}
                   </div>
-
-                  <div className="rounded-xl border border-violet-200 bg-violet-50 p-3 space-y-3">
-                    <div className="font-bold text-violet-900 text-sm">個人專屬 Prompt 出題（Canvas 互動）</div>
-                    <p className="text-[11px] text-violet-800">進度分母仍用上方「納入」課題。此處再選<strong>今次 Prompt 要出題的課題</strong>（可只選其中幾項）。</p>
-                    {!topicIds.length ? (
-                      <p className="text-xs text-slate-400">請先在上方勾選納入補底課題</p>
-                    ) : (
-                      <div className="flex flex-wrap gap-1.5">
-                        {topicIds.map(tid => {
-                          const on = promptTopicIds.includes(tid);
-                          const tt = topics[tid] || {};
-                          return (
-                            <label key={tid} className={`text-[11px] font-bold px-2 py-1 rounded-lg border-2 cursor-pointer ${on?"border-violet-500 bg-white text-violet-900":"border-slate-200 bg-white/50 text-slate-500"}`}>
-                              <input type="checkbox" className="mr-1" checked={on}
-                                onChange={() => setPromptTopicIds(prev => prev.includes(tid) ? prev.filter(x=>x!==tid) : [...prev, tid])} />
-                              <span className="mono">{tid}</span>
-                              {tt.done ? " ✓" : ""}
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <div className="flex gap-2 text-[11px]">
-                      <button type="button" className="font-bold text-violet-700" onClick={() => setPromptTopicIds(topicIds.slice())}>全選納入課題</button>
-                      <button type="button" className="font-bold text-slate-500" onClick={() => setPromptTopicIds(topicIds.filter(id => !topics[id]?.done))}>只選未完成</button>
-                      <button type="button" className="font-bold text-slate-400" onClick={() => setPromptTopicIds([])}>清空</button>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <label className="text-xs font-bold">難度
-                        <select className="mt-0.5 w-full border rounded px-1 py-1" value={mkLevel} onChange={e=>setMkLevel(e.target.value)}>
-                          <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
-                        </select>
-                      </label>
-                      <label className="text-xs font-bold">MC
-                        <input type="number" className="mt-0.5 w-full border rounded px-1 py-1" value={mkMc} onChange={e=>setMkMc(parseInt(e.target.value)||0)} />
-                      </label>
-                      <label className="text-xs font-bold">LQ
-                        <input type="number" className="mt-0.5 w-full border rounded px-1 py-1" value={mkLq} onChange={e=>setMkLq(parseInt(e.target.value)||0)} />
-                      </label>
-                    </div>
-                    <button className="bg-violet-600 text-white font-bold text-sm px-4 py-2 rounded-lg"
-                      onClick={() => {
-                        if (!promptTopicIds.length && !topicIds.length) return alert("請先納入並勾選 Prompt 課題");
-                        if (!promptTopicIds.length) return alert("請勾選今次 Prompt 要針對的課題");
-                        navigator.clipboard.writeText(buildMakeupPrompt()).then(()=>alert("已複製補考 Prompt（"+promptTopicIds.length+" 個課題）")).catch(()=>alert("失敗"));
-                      }}>
-                      複製此生補考 Prompt（{promptTopicIds.length || 0} 課題）
-                    </button>
+                  <div className="text-xs text-slate-500">
+                    進度 {focusDone}/{focusIds.length}（{focusPct}%）
+                    {focusComplete && <span className="ml-2 text-emerald-600 font-bold">✓ 全部課題已完成</span>}
                   </div>
                 </div>
-              );
-            })()}
-          </div>
+                <button className="text-rose-600 text-xs font-bold" onClick={() => removeStudent(focus)}>移出名單</button>
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-2">
+                <label className="text-xs font-bold">約見／備註（例如 Lunch、放學、只做 Q1-2）
+                  <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
+                    value={focusM.sessionNote || ""}
+                    onChange={e => {
+                      const next = { ...makeup, [focus]: { ...focusM, sessionNote: e.target.value, updatedAt: new Date().toISOString() } };
+                      setMakeup(next);
+                    }}
+                    onBlur={() => persist(makeup)}
+                    placeholder="今日約 Lunch；上次做到 2.3.3" />
+                </label>
+                <label className="text-xs font-bold">其他備註
+                  <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
+                    value={focusM.remark || ""}
+                    onChange={e => {
+                      const next = { ...makeup, [focus]: { ...focusM, remark: e.target.value } };
+                      setMakeup(next);
+                    }}
+                    onBlur={() => persist(makeup)} />
+                </label>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-2">
+                  <div className="font-bold text-sm text-slate-700">補底課題（點選 = 今日已完成）</div>
+                  <button className="text-xs text-indigo-600 font-bold"
+                    onClick={() => {
+                      const extra = buildWeakTopicsForStudent(focus);
+                      const nextTopics = { ...focusTopics };
+                      Object.entries(extra).forEach(([tid, v]) => {
+                        if (!nextTopics[tid]) nextTopics[tid] = v;
+                      });
+                      const next = { ...makeup, [focus]: { ...focusM, topics: nextTopics } };
+                      persist(next);
+                    }}>由考試成績重掃弱項</button>
+                </div>
+                {!focusIds.length && <p className="text-xs text-slate-400">未有課題。可「重掃弱項」或手動在下方加入。</p>}
+                <div className="space-y-1.5 max-h-48 overflow-auto">
+                  {focusIds.map(tid => {
+                    const tpc = focusTopics[tid];
+                    return (
+                      <label key={tid} className={`flex items-start gap-2 border rounded-xl p-2 cursor-pointer ${tpc.done?"bg-emerald-50 border-emerald-200":"bg-white border-slate-100"}`}>
+                        <input type="checkbox" className="mt-1" checked={!!tpc.done}
+                          onChange={() => {
+                            const nextTopics = {
+                              ...focusTopics,
+                              [tid]: { ...tpc, done: !tpc.done }
+                            };
+                            const ids = Object.keys(nextTopics);
+                            const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
+                            const next = {
+                              ...makeup,
+                              [focus]: {
+                                ...focusM,
+                                topics: nextTopics,
+                                status: allDone ? "DONE" : "PENDING",
+                                updatedAt: new Date().toISOString()
+                              }
+                            };
+                            persist(next);
+                          }} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-bold">
+                            <span className="mono text-purple-700">{tid}</span>{" "}
+                            {tpc.label || ""}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            考試約 {tpc.pct != null ? tpc.pct + "%" : "—"}
+                            {tpc.done ? " · 已完成" : " · 待補"}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-xl border-2 border-purple-200 bg-purple-50 p-4 space-y-3">
+                <div className="font-bold text-purple-900 text-sm">今次補底 · 出題 Prompt（只含未完成／你勾選的課題）</div>
+                <p className="text-[11px] text-purple-800">時間有限可只選 1–2 個 topic；完成後剔低，下日再繼續。</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {focusIds.map(tid => {
+                    const on = promptTopicIds.includes(tid);
+                    return (
+                      <button key={tid} type="button"
+                        onClick={() => setPromptTopicIds(prev => prev.includes(tid) ? prev.filter(x => x !== tid) : [...prev, tid])}
+                        className={`text-[11px] font-bold px-2 py-1 rounded-lg border ${on?"bg-purple-600 text-white border-purple-700":"bg-white text-slate-600 border-slate-200"} ${focusTopics[tid]?.done?"opacity-50":""}`}>
+                        {tid}{focusTopics[tid]?.done?" ✓":""}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <label className="text-xs font-bold">難度
+                    <select className="mt-0.5 w-full border rounded px-1 py-1" value={mkLevel} onChange={e=>setMkLevel(e.target.value)}>
+                      <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
+                    </select>
+                  </label>
+                  <label className="text-xs font-bold">MC
+                    <input type="number" className="mt-0.5 w-full border rounded px-1 py-1" value={mkMc} onChange={e=>setMkMc(parseInt(e.target.value)||0)} />
+                  </label>
+                  <label className="text-xs font-bold">LQ
+                    <input type="number" className="mt-0.5 w-full border rounded px-1 py-1" value={mkLq} onChange={e=>setMkLq(parseInt(e.target.value)||0)} />
+                  </label>
+                </div>
+                <button className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 rounded-xl text-sm"
+                  onClick={() => navigator.clipboard.writeText(buildPrompt(focus)).then(()=>alert("已複製今次補底 Prompt")).catch(()=>alert("失敗"))}>
+                  複製 Canvas 互動補底 Prompt（{promptTopicIds.length || "未完成"} 課題）
+                </button>
+              </div>
+            </>
+          )}
         </div>
-        {makeupSaving && <div className="text-[11px] text-slate-400">補考記錄儲存中…</div>}
       </div>
     </div>
   );
@@ -7183,6 +7239,7 @@ function App() {
         {view==="quizSummary" && <QuizSummaryView activeStudents={activeStudents} quizMaps={quizMaps} currentCohort={cohort} />}
         {view==="quizSettings" && <QuizSettingsView students={students} quizMaps={quizMaps} setQuizMaps={setQuizMaps} currentCohort={cohort} />}
         {view==="examInput" && <ExamInputAnalysisView activeStudents={activeStudents} examMaps={examMaps} examScores={examScores} setExamScores={setExamScores} currentCohort={cohort} />}
+        {view==="examMakeup" && <ExamMakeupView activeStudents={activeStudents} examMaps={examMaps} examScores={examScores} setExamScores={setExamScores} currentCohort={cohort} />}
         {view==="examSummary" && <ExamSummaryView activeStudents={activeStudents} examMaps={examMaps} currentCohort={cohort} />}
         {view==="examSettings" && <ExamSettingsView students={students} examMaps={examMaps} setExamMaps={setExamMaps} currentCohort={cohort} />}
         {view==="ppInput" && <PastpaperInputAnalysisView activeStudents={activeStudents} pastpaperMaps={pastpaperMaps} pastpaperScores={pastpaperScores} setPastpaperScores={setPastpaperScores} />}
