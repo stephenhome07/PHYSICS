@@ -356,6 +356,21 @@ async function deletePastpaperScore(studentId, paperId) {
   await db.collection("scores").doc(studentId).collection("pastpapers").doc(String(paperId)).delete();
 }
 
+async function loadAllPastpaperScoresForStudent(sid) {
+  const out = {};
+  try {
+    const snap = await db.collection("scores").doc(sid).collection("pastpapers").get();
+    snap.forEach(d => {
+      let data = d.data() || {};
+      if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
+        data = { ...data.value, updatedAt: data.updatedAt };
+      }
+      out[d.id] = data;
+    });
+  } catch (e) { console.warn(e); }
+  return out;
+}
+
 /** DSE 模擬等級：參考近年 Physics 公開試表現分佈粗略對應卷面得分率 */
 function estimateDseLevel(pct01) {
   const p = (pct01 == null || isNaN(pct01)) ? null : (pct01 > 1 ? pct01 / 100 : pct01);
@@ -522,6 +537,7 @@ function Sidebar({ view, setView }) {
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">歷屆試題</div>
         <Item id="ppInput" label="歷屆試題輸入及分析" />
+        <Item id="ppPersonal" label="個人 Pastpaper 分析" />
         <Item id="ppSettings" label="Pastpaper 題庫設定" />
       </div>
     </aside>
@@ -4998,6 +5014,341 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
   );
 }
 
+
+function PastpaperPersonalAnalysisView({ activeStudents, pastpaperMaps }) {
+  const [selectedStudentId, setSelectedStudentId] = useState("");
+  const [scores, setScores] = useState({}); // paperId -> record
+  const [loading, setLoading] = useState(false);
+  const [selectedPapers, setSelectedPapers] = useState([]);
+  const [selectedTopics, setSelectedTopics] = useState([]);
+  const [aiLang, setAiLang] = useState("繁體中文");
+  const [aiMcCount, setAiMcCount] = useState(8);
+  const [aiLqCount, setAiLqCount] = useState(2);
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
+
+  useEffect(() => {
+    if (!selectedStudentId) { setScores({}); setSelectedPapers([]); return; }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await loadAllPastpaperScoresForStudent(selectedStudentId);
+        if (cancelled) return;
+        setScores(data);
+        const taken = Object.keys(data).filter(pid => {
+          const rec = data[pid] || {};
+          return Object.keys(rec).some(k => k !== "updatedAt" && k !== "_submitMonth" && k !== "_id" && k !== "value" && rec[k] !== "" && rec[k] != null);
+        }).sort();
+        setSelectedPapers(taken);
+        setSelectedTopics([]);
+      } catch (e) { console.warn(e); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedStudentId]);
+
+  const allPapersTaken = useMemo(() => {
+    return Object.keys(scores).filter(pid => {
+      const rec = scores[pid] || {};
+      return Object.keys(rec).some(k => k !== "updatedAt" && k !== "_submitMonth" && k !== "_id" && k !== "value" && rec[k] !== "" && rec[k] != null);
+    }).sort();
+  }, [scores]);
+
+  const hasAnsweredQ = (paperId, qId) => {
+    const val = scores?.[paperId]?.[qId];
+    return val !== undefined && val !== null && val !== "";
+  };
+
+  const getStudentQScore = (paperId, q) => {
+    const val = scores?.[paperId]?.[q.id];
+    if (val === undefined || val === null || val === "") return 0;
+    if (q.type === "MC") {
+      if (!q.ans) return 0;
+      const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+      const ans = String(val).toUpperCase().trim().replace(/[^A-D]/g, "");
+      return corrects.includes(ans) ? (q.max || 1) : 0;
+    }
+    const n = parseFloat(val);
+    return isNaN(n) ? 0 : n;
+  };
+
+  const studentAnalysis = useMemo(() => {
+    if (!selectedStudentId || !selectedPapers.length) {
+      return { topics: [], domainStats: {} };
+    }
+    const topicStats = {};
+    const domainStats = {
+      "1": { name: "熱學 (Heat)", max: 0, earned: 0 },
+      "2": { name: "力學 (Mechanics)", max: 0, earned: 0 },
+      "3": { name: "波動 (Waves)", max: 0, earned: 0 },
+      "4": { name: "電磁學 (E&M)", max: 0, earned: 0 },
+      "5": { name: "放射學 (Radioactivity)", max: 0, earned: 0 },
+      "E3": { name: "能量 (Energy)", max: 0, earned: 0 },
+      "E4": { name: "醫學 (Medical)", max: 0, earned: 0 }
+    };
+
+    selectedPapers.forEach(paperId => {
+      const map = pastpaperMaps[paperId];
+      if (!map || !map.questions) return;
+      map.questions.forEach(q => {
+        if (!hasAnsweredQ(paperId, q.id)) return;
+        const score = getStudentQScore(paperId, q);
+        const tid = q.topicId || "（無）";
+        if (!topicStats[tid]) {
+          const info = SYLLABUS_TOPICS?.[tid];
+          topicStats[tid] = {
+            topicId: tid,
+            topicName: (info && typeof info === "object") ? (info.topic || info.name || "未定義") : (info || "未定義"),
+            syllabusDesc: (info && typeof info === "object") ? (info.desc || "") : "",
+            totalMax: 0, totalEarned: 0, yearlyStats: {}, errorDescList: new Set()
+          };
+        }
+        if (!topicStats[tid].yearlyStats[paperId]) topicStats[tid].yearlyStats[paperId] = { max: 0, earned: 0 };
+        topicStats[tid].totalMax += q.max || 1;
+        topicStats[tid].totalEarned += score;
+        topicStats[tid].yearlyStats[paperId].max += q.max || 1;
+        topicStats[tid].yearlyStats[paperId].earned += score;
+        if (score < (q.max || 1) && q.topicDesc) {
+          topicStats[tid].errorDescList.add(typeof q.topicDesc === "object" ? (q.topicDesc.topic || q.topicDesc.desc || "") : q.topicDesc);
+        }
+        let domainKey = "";
+        if (String(tid).startsWith("E3")) domainKey = "E3";
+        else if (String(tid).startsWith("E4")) domainKey = "E4";
+        else domainKey = String(tid).charAt(0);
+        if (domainStats[domainKey]) {
+          domainStats[domainKey].max += q.max || 1;
+          domainStats[domainKey].earned += score;
+        }
+      });
+    });
+
+    const topics = Object.values(topicStats)
+      .map(t => ({
+        ...t,
+        overallPct: t.totalMax > 0 ? t.totalEarned / t.totalMax : 0,
+        errorDescArray: Array.from(t.errorDescList)
+      }))
+      .filter(t => t.totalMax > 0 && t.overallPct <= 0.6)
+      .sort((a, b) => a.overallPct - b.overallPct);
+
+    return { topics, domainStats };
+  }, [selectedStudentId, selectedPapers, scores, pastpaperMaps]);
+
+  // Radar chart
+  useEffect(() => {
+    if (!selectedStudentId || !selectedPapers.length || !chartRef.current) return;
+    const ds = studentAnalysis.domainStats || {};
+    const labels = [];
+    const dataPoints = [];
+    Object.keys(ds).forEach(key => {
+      if (ds[key].max > 0) {
+        labels.push(ds[key].name);
+        dataPoints.push(Math.round((ds[key].earned / ds[key].max) * 100));
+      }
+    });
+    if (typeof Chart === "undefined") return;
+    if (chartInstance.current) chartInstance.current.destroy();
+    if (!labels.length) return;
+    chartInstance.current = new Chart(chartRef.current.getContext("2d"), {
+      type: "radar",
+      data: {
+        labels,
+        datasets: [{
+          label: "綜合掌握度 (%)",
+          data: dataPoints,
+          backgroundColor: "rgba(79, 70, 229, 0.2)",
+          borderColor: "rgba(79, 70, 229, 0.8)",
+          pointBackgroundColor: "rgba(79, 70, 229, 1)",
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          r: {
+            min: 0, max: 100,
+            ticks: { stepSize: 20, display: false },
+            pointLabels: { font: { size: 10, weight: "bold" }, color: "#475569" }
+          }
+        },
+        plugins: { legend: { display: false } }
+      }
+    });
+    return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+  }, [studentAnalysis, selectedStudentId, selectedPapers]);
+
+  const studentName = activeStudents.find(s => s.id === selectedStudentId)?.name || "該學生";
+
+  const generatedPrompt = useMemo(() => {
+    if (!selectedStudentId || !selectedTopics.length || !studentAnalysis.topics.length) {
+      return "👈 請先從下方勾選至少一個弱點課題。";
+    }
+    const targetTopics = studentAnalysis.topics.filter(t => selectedTopics.includes(t.topicId));
+    const weakTopicsText = targetTopics.map(t =>
+      `- 課題 [${t.topicId} ${t.topicName}]:\n  已選卷平均得分率: ${(t.overallPct * 100).toFixed(0)}%\n  官方學習要求: ${t.syllabusDesc || "—"}\n  具體錯因: ${t.errorDescArray.join("; ") || "綜合概念薄弱"}`
+    ).join("\n\n");
+    const syllabus = getSyllabusTableText(targetTopics.map(t => t.topicId));
+    return `【身份】你是香港 DSE 物理科權威專家。
+
+【任務】學生【${studentName}】在近幾年 Pastpaper 操練中，下列課題得分率 ≤60%。請針對錯因度身訂造強效補底卷。
+
+【基本設定】
+- 語言: ${aiLang}
+- MC：${aiMcCount} 題；LQ：${aiLqCount} 題
+
+【學生重災區課題與具體錯因】
+${weakTopicsText}
+
+【課程大綱參考】
+${syllabus}
+
+【生成要求】
+1. 針對「具體錯因」設計針對性題目，釐清最常混淆觀念。
+2. MC 附 4 選項與【陷阱破解分析】；LQ 附【DSE 評分標準】與【解題思路】。
+3. 開頭給【${studentName}】一段簡短有力鼓勵。
+4. 每題標明 topicId。`;
+  }, [aiLang, aiMcCount, aiLqCount, selectedTopics, selectedStudentId, studentAnalysis, studentName]);
+
+  const togglePaper = (pid) => setSelectedPapers(prev => prev.includes(pid) ? prev.filter(p => p !== pid) : [...prev, pid]);
+  const toggleAllPapers = () => {
+    if (selectedPapers.length === allPapersTaken.length) setSelectedPapers([]);
+    else setSelectedPapers([...allPapersTaken]);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap justify-between items-center gap-3">
+        <div>
+          <h2 className="font-bold text-xl text-indigo-800">個人 Pastpaper 分析</h2>
+          <p className="text-sm text-slate-500">跨年弱點追蹤與補底（可篩選年份／卷目）</p>
+        </div>
+        <select className="border-2 rounded-lg px-3 py-2 text-sm font-bold min-w-[200px]" value={selectedStudentId}
+          onChange={e => setSelectedStudentId(e.target.value)}>
+          <option value="">-- 請選擇分析對象 --</option>
+          {activeStudents.map(s => <option key={s.id} value={s.id}>{s.class}({s.num}) {s.name}</option>)}
+        </select>
+      </div>
+
+      {!selectedStudentId && (
+        <div className="bg-white border border-dashed rounded-2xl p-16 text-center text-slate-400">請選擇一位學生，展開歷年 DSE 物理數據圖譜</div>
+      )}
+      {selectedStudentId && loading && <div className="text-sm text-slate-400">載入該生全部 Pastpaper 成績…</div>}
+      {selectedStudentId && !loading && allPapersTaken.length === 0 && (
+        <div className="bg-white border border-dashed rounded-2xl p-16 text-center text-slate-400">該學生目前尚未有任何 Pastpaper 成績紀錄</div>
+      )}
+
+      {selectedStudentId && !loading && allPapersTaken.length > 0 && (
+        <div className="space-y-4">
+          <div className="grid lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-2 bg-white rounded-2xl border p-4">
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="font-bold text-sm text-slate-800">分析範圍篩選 (年份/卷目)</h3>
+                <button className="text-xs text-indigo-600 font-bold underline" onClick={toggleAllPapers}>
+                  {selectedPapers.length === allPapersTaken.length ? "取消全選" : "全選所有試卷"}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2 max-h-40 overflow-auto">
+                {allPapersTaken.map(pid => {
+                  const on = selectedPapers.includes(pid);
+                  return (
+                    <button key={pid} type="button" onClick={() => togglePaper(pid)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold border ${on ? "bg-indigo-50 border-indigo-300 text-indigo-700" : "bg-white border-slate-200 text-slate-400"}`}>
+                      {on ? "☑ " : "☐ "}{pastpaperMaps[pid]?.title || pid}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border p-4">
+              <h3 className="font-bold text-sm text-indigo-800 mb-2">DSE 七大領域綜合能力圖</h3>
+              <div className="h-56 relative">
+                <canvas ref={chartRef}></canvas>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid lg:grid-cols-5 gap-4">
+            <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="font-bold text-rose-700">重災區課題（得分率 ≤ 60%）</h3>
+                <span className="text-xs text-slate-500">共 {studentAnalysis.topics.length} 個弱點</span>
+              </div>
+              <div className="max-h-[28rem] overflow-auto space-y-2">
+                {studentAnalysis.topics.map(t => {
+                  const on = selectedTopics.includes(t.topicId);
+                  const sev = t.overallPct <= 0.3 ? "極度薄弱" : t.overallPct <= 0.45 ? "明顯弱項" : "需加強";
+                  return (
+                    <label key={t.topicId} className={`block border rounded-xl p-3 cursor-pointer ${on ? "border-indigo-400 bg-indigo-50/50" : "border-slate-100 hover:bg-slate-50"}`}>
+                      <div className="flex items-start gap-2">
+                        <input type="checkbox" className="mt-1" checked={on}
+                          onChange={() => setSelectedTopics(prev => prev.includes(t.topicId) ? prev.filter(x => x !== t.topicId) : [...prev, t.topicId])} />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap justify-between gap-2">
+                            <div className="font-bold text-sm"><span className="mono text-indigo-700">{t.topicId}</span> {t.topicName}</div>
+                            <div className="text-right">
+                              <span className={`text-[10px] font-black px-1.5 py-0.5 rounded ${t.overallPct<=0.3?"bg-rose-100 text-rose-700":"bg-amber-100 text-amber-800"}`}>{sev}</span>
+                              <div className="text-sm font-black text-rose-600">{Math.round(t.overallPct*100)}%</div>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {Object.entries(t.yearlyStats || {}).map(([pid, st]) => (
+                              <span key={pid} className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
+                                {pid} {st.earned}/{st.max}
+                              </span>
+                            ))}
+                          </div>
+                          {(t.errorDescArray || []).length > 0 && (
+                            <div className="text-[11px] text-slate-600 mt-1">具體錯因：{t.errorDescArray.join("；")}</div>
+                          )}
+                          {t.syllabusDesc && <div className="text-[10px] text-slate-400 mt-0.5 line-clamp-2">{t.syllabusDesc}</div>}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+                {!studentAnalysis.topics.length && <p className="text-slate-400 text-sm p-4">所選卷目中沒有 ≤60% 的重災課題（或尚未入分）。</p>}
+              </div>
+            </div>
+
+            <div className="lg:col-span-2 bg-white rounded-2xl border border-indigo-100 p-4 space-y-3">
+              <h3 className="font-bold text-indigo-800">DSE 專屬補底卷生成器</h3>
+              <p className="text-xs text-slate-500">勾選左側弱點後，複製 Prompt 到 AI 平台生成。</p>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-xs font-bold">語言
+                  <select className="mt-0.5 w-full border rounded px-2 py-1.5" value={aiLang} onChange={e=>setAiLang(e.target.value)}>
+                    <option>繁體中文</option>
+                    <option>English</option>
+                    <option>雙語 (Bilingual)</option>
+                  </select>
+                </label>
+                <div className="grid grid-cols-2 gap-1">
+                  <label className="text-xs font-bold">MC
+                    <input type="number" className="mt-0.5 w-full border rounded px-1 py-1.5" value={aiMcCount} onChange={e=>setAiMcCount(parseInt(e.target.value)||0)} />
+                  </label>
+                  <label className="text-xs font-bold">LQ
+                    <input type="number" className="mt-0.5 w-full border rounded px-1 py-1.5" value={aiLqCount} onChange={e=>setAiLqCount(parseInt(e.target.value)||0)} />
+                  </label>
+                </div>
+              </div>
+              <div className="rounded-xl border bg-slate-50 p-3 max-h-64 overflow-auto">
+                <div className="text-xs font-bold text-slate-500 mb-1">AI Prompt 預覽</div>
+                <pre className="text-[11px] whitespace-pre-wrap text-slate-700 font-sans">{generatedPrompt}</pre>
+              </div>
+              <button className="w-full bg-indigo-600 text-white font-bold py-2.5 rounded-xl text-sm"
+                disabled={!selectedTopics.length}
+                onClick={() => navigator.clipboard.writeText(generatedPrompt).then(()=>alert("已複製專屬補底 Prompt")).catch(()=>alert("失敗"))}>
+                複製專屬補底 Prompt（{selectedTopics.length} 課題）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PastpaperSettingsView({ pastpaperMaps, setPastpaperMaps }) {
   const [jsonText, setJsonText] = useState("");
   const [status, setStatus] = useState("");
@@ -5242,6 +5593,7 @@ function App() {
         {view==="examSummary" && <ExamSummaryView activeStudents={activeStudents} examMaps={examMaps} currentCohort={cohort} />}
         {view==="examSettings" && <ExamSettingsView students={students} examMaps={examMaps} setExamMaps={setExamMaps} currentCohort={cohort} />}
         {view==="ppInput" && <PastpaperInputAnalysisView activeStudents={activeStudents} pastpaperMaps={pastpaperMaps} pastpaperScores={pastpaperScores} setPastpaperScores={setPastpaperScores} />}
+        {view==="ppPersonal" && <PastpaperPersonalAnalysisView activeStudents={activeStudents} pastpaperMaps={pastpaperMaps} />}
         {view==="ppSettings" && <PastpaperSettingsView pastpaperMaps={pastpaperMaps} setPastpaperMaps={setPastpaperMaps} />}
       </main>
     </div>
