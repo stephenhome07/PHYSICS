@@ -108,6 +108,12 @@ async function loadCollectionMaps(col) {
   snap.forEach(d => { out[d.id] = { ...d.data(), _id: d.id }; });
   return out;
 }
+async function savePastpaperScore(studentId, paperId, record) {
+  await db.collection("scores").doc(studentId).collection("pastpapers").doc(String(paperId)).set({
+    ...record,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
 async function loadMakeupCollection(col) {
   const out = {};
   try {
@@ -1201,6 +1207,407 @@ function SchoolProgressView({ student, maps, scores, makeup }) {
 }
 
 
+
+function parsePastpaperMeta(paperId, map) {
+  const id = String(paperId || "");
+  const title = (map && map.title) || id;
+  let year = null;
+  const ym = id.match(/(20\d{2})/) || title.match(/(20\d{2})/);
+  if (ym) year = ym[1];
+  let kind = "OTHER";
+  const u = (id + " " + title).toUpperCase();
+  if (/P1A|PAPER\s*1A|1A\s*\(MC\)|\bMC\b/.test(u) && /1A|PAPER\s*1A/.test(u)) kind = "P1A";
+  else if (/P1B|PAPER\s*1B|1B\s*\(/.test(u)) kind = "P1B";
+  else if (/P2|PAPER\s*2/.test(u)) kind = "P2";
+  else if (/P1A|1A/.test(u)) kind = "P1A";
+  else if (/P1B|1B/.test(u)) kind = "P1B";
+  return { year, kind };
+}
+
+/** 年份綜合（公開試權重）：Paper1 60% + Paper2 20% + SBA 20%（本系統不計 SBA）
+ *  顯示用：將已有的 60/20 化算回 100 分制 → raw / weightSum
+ *  例：只有 P1+P2 → (0.6*p1 + 0.2*p2) / 0.8
+ */
+function yearCompositeScore(parts) {
+  const p1e = (parts.P1A?.earned || 0) + (parts.P1B?.earned || 0);
+  const p1m = (parts.P1A?.max || 0) + (parts.P1B?.max || 0);
+  const p2e = parts.P2?.earned || 0;
+  const p2m = parts.P2?.max || 0;
+  const hasP1 = p1m > 0;
+  const hasP2 = p2m > 0;
+  if (!hasP1 && !hasP2) return null;
+  const p1pct = hasP1 ? p1e / p1m : null;
+  const p2pct = hasP2 ? p2e / p2m : null;
+  let raw = 0, wSum = 0;
+  if (hasP1) { raw += p1pct * 0.6; wSum += 0.6; }
+  if (hasP2) { raw += p2pct * 0.2; wSum += 0.2; }
+  const pct = wSum > 0 ? raw / wSum : null;
+  return {
+    pct,
+    p1pct, p2pct,
+    p1e, p1m, p2e, p2m,
+    weightNote: "P1 60% + P2 20%（SBA 20% 不計，已化算回 100）",
+    grade: estimateDseLevel(pct)
+  };
+}
+
+function PastpaperStudentView({ student, maps, scores, setScores }) {
+  const ppMaps = maps.pastpaper || {};
+  const [yearFilter, setYearFilter] = useState("ALL");
+  const [editPaperId, setEditPaperId] = useState("");
+  const [draft, setDraft] = useState({});
+  const [saveStatus, setSaveStatus] = useState("");
+  const [domainByYear, setDomainByYear] = useState({});
+  const chartRefs = useRef({});
+  const chartInst = useRef({});
+  const saveTimer = useRef(null);
+
+  const paperList = useMemo(() => {
+    return Object.keys(ppMaps).map(id => {
+      const meta = parsePastpaperMeta(id, ppMaps[id]);
+      return { id, map: ppMaps[id], ...meta, title: ppMaps[id]?.title || id };
+    }).sort((a, b) => String(b.year || "").localeCompare(String(a.year || "")) || String(a.kind).localeCompare(String(b.kind)) || String(a.id).localeCompare(String(b.id)));
+  }, [ppMaps]);
+
+  const years = useMemo(() => {
+    const s = new Set(paperList.map(p => p.year).filter(Boolean));
+    return Array.from(s).sort((a, b) => b.localeCompare(a));
+  }, [paperList]);
+
+  const scoreOfPaper = (paperId) => {
+    const map = ppMaps[paperId];
+    const rec = scores.pastpapers?.[paperId] || {};
+    if (!map?.questions?.length) return null;
+    let earned = 0, max = 0, any = false, answered = 0;
+    map.questions.forEach(q => {
+      max += q.max || 1;
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      any = true;
+      answered++;
+      const sc = quizQuestionScore(q, raw);
+      earned += sc == null ? 0 : sc;
+    });
+    if (!any) return null;
+    return { earned, max, pct: max > 0 ? earned / max : 0, answered, totalQ: map.questions.length };
+  };
+
+  const yearGroups = useMemo(() => {
+    const byYear = {};
+    paperList.forEach(p => {
+      if (!p.year) return;
+      if (yearFilter !== "ALL" && p.year !== yearFilter) return;
+      if (!byYear[p.year]) byYear[p.year] = { year: p.year, papers: [], parts: {} };
+      const sc = scoreOfPaper(p.id);
+      byYear[p.year].papers.push({ ...p, sc });
+      if (sc && (p.kind === "P1A" || p.kind === "P1B" || p.kind === "P2")) {
+        byYear[p.year].parts[p.kind] = { earned: sc.earned, max: sc.max };
+      }
+    });
+    Object.values(byYear).forEach(g => {
+      g.composite = yearCompositeScore(g.parts);
+      g.doneCount = g.papers.filter(x => x.sc).length;
+    });
+    return Object.values(byYear).sort((a, b) => b.year.localeCompare(a.year));
+  }, [paperList, scores.pastpapers, yearFilter]);
+
+  // domain radar data per year
+  useEffect(() => {
+    const out = {};
+    yearGroups.forEach(g => {
+      const acc = {};
+      Object.keys(DOMAIN_LABELS).forEach(k => { acc[k] = { earned: 0, max: 0 }; });
+      g.papers.forEach(p => {
+        if (!p.sc) return;
+        const rec = scores.pastpapers?.[p.id] || {};
+        const map = p.map;
+        if (!map?.questions) return;
+        map.questions.forEach(q => {
+          const raw = rec[q.id];
+          if (raw === undefined || raw === null || String(raw).trim() === "") return;
+          const dk = domainFromTopicId(q.topicId);
+          if (!dk || !acc[dk]) return;
+          const sc = quizQuestionScore(q, raw);
+          if (sc == null) return;
+          acc[dk].max += q.max || 1;
+          acc[dk].earned += sc;
+        });
+      });
+      const labels = [], data = [];
+      ["1", "2", "3", "4", "5"].forEach(k => {
+        if (acc[k].max > 0) {
+          labels.push(DOMAIN_LABELS[k]);
+          data.push(Math.round((acc[k].earned / acc[k].max) * 100));
+        }
+      });
+      out[g.year] = { labels, data };
+    });
+    setDomainByYear(out);
+  }, [yearGroups, scores.pastpapers]);
+
+  useEffect(() => {
+    if (typeof Chart === "undefined") return;
+    Object.keys(domainByYear).forEach(year => {
+      const canvas = chartRefs.current[year];
+      if (!canvas) return;
+      const { labels, data } = domainByYear[year];
+      if (chartInst.current[year]) chartInst.current[year].destroy();
+      if (!labels?.length) return;
+      chartInst.current[year] = new Chart(canvas.getContext("2d"), {
+        type: "radar",
+        data: {
+          labels,
+          datasets: [{
+            data,
+            backgroundColor: "rgba(99,102,241,0.2)",
+            borderColor: "rgba(79,70,229,0.85)",
+            pointBackgroundColor: "rgba(79,70,229,1)",
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: { r: { min: 0, max: 100, ticks: { display: false }, pointLabels: { font: { size: 11, weight: "bold" } } } },
+          plugins: { legend: { display: false } }
+        }
+      });
+    });
+    return () => {
+      Object.values(chartInst.current).forEach(c => { try { c.destroy(); } catch (e) {} });
+    };
+  }, [domainByYear]);
+
+  const openEdit = (paperId) => {
+    const rec = scores.pastpapers?.[paperId] || {};
+    const map = ppMaps[paperId];
+    const d = {};
+    (map?.questions || []).forEach(q => {
+      d[q.id] = rec[q.id] != null ? String(rec[q.id]) : "";
+    });
+    setDraft(d);
+    setEditPaperId(paperId);
+    setSaveStatus("");
+  };
+
+  const scheduleSave = (paperId, nextDraft) => {
+    setSaveStatus("儲存中…");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        const record = { ...nextDraft };
+        // strip empty
+        Object.keys(record).forEach(k => {
+          if (record[k] === "" || record[k] == null) delete record[k];
+        });
+        await savePastpaperScore(student.id, paperId, record);
+        setScores(prev => ({
+          ...prev,
+          pastpapers: { ...prev.pastpapers, [paperId]: { ...record, updatedAt: new Date().toISOString() } }
+        }));
+        setSaveStatus("已儲存");
+      } catch (e) {
+        setSaveStatus("失敗: " + e.message);
+      }
+    }, 600);
+  };
+
+  const setAns = (qid, val, opts = {}) => {
+    const next = { ...draft, [qid]: val };
+    setDraft(next);
+    scheduleSave(editPaperId, next);
+    if (opts.jumpNext && editMap?.questions) {
+      const qs = editMap.questions;
+      const idx = qs.findIndex(q => q.id === qid);
+      if (idx >= 0 && idx < qs.length - 1) {
+        const nextId = qs[idx + 1].id;
+        setTimeout(() => {
+          const el = document.querySelector(`[data-pp-qid="${nextId}"]`);
+          if (el) { el.focus(); el.select && el.select(); }
+        }, 30);
+      }
+    }
+  };
+
+  const editMap = editPaperId ? ppMaps[editPaperId] : null;
+  const editMeta = editPaperId ? parsePastpaperMeta(editPaperId, editMap) : null;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap justify-between gap-3 items-end">
+        <div>
+          <h2 className="text-2xl font-black text-slate-800">歷屆試題</h2>
+          <p className="text-base text-slate-500 mt-1">自行輸入分數 · 按年份睇表現與等級預估（P1 60% + P2 20%，化算回 100；SBA 不計）</p>
+        </div>
+        <label className="text-sm font-bold text-slate-600">年份
+          <select className="ml-2 border-2 rounded-xl px-3 py-2 text-base font-bold" value={yearFilter} onChange={e => setYearFilter(e.target.value)}>
+            <option value="ALL">全部年份</option>
+            {years.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+        </label>
+      </div>
+
+      {/* 輸入面板 */}
+      {editPaperId && editMap && (
+        <div className="bg-white rounded-3xl border-2 border-indigo-200 shadow-lg p-5 space-y-4">
+          <div className="flex flex-wrap justify-between gap-3 items-start">
+            <div>
+              <div className="text-lg font-black text-indigo-900">{editMap.title || editPaperId}</div>
+              <div className="text-sm text-slate-500 mt-0.5">{editPaperId} · {editMeta?.year || "—"} · {editMeta?.kind}</div>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-bold text-slate-500">{saveStatus}</span>
+              <button type="button" className="text-base font-bold text-slate-600 border px-3 py-1.5 rounded-xl" onClick={() => setEditPaperId("")}>關閉</button>
+            </div>
+          </div>
+          <p className="text-sm text-slate-500">輸入後約 0.6 秒自動儲存。MC 填一字母會跳下一題；長題按 Enter 跳下一題。</p>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[55vh] overflow-auto">
+            {(editMap.questions || []).map(q => {
+              const raw = draft[q.id] ?? "";
+              const has = String(raw).trim() !== "";
+              let color = "border-slate-200 bg-white";
+              if (has && q.type === "MC") {
+                const ok = q.ans && q.ans.toString().split(",").map(a => a.trim().toUpperCase()).includes(String(raw).trim().toUpperCase());
+                color = ok ? "border-emerald-400 bg-emerald-50" : "border-rose-400 bg-rose-50";
+              } else if (has && q.type !== "MC") {
+                const n = parseFloat(raw);
+                if (!isNaN(n) && n <= 0) color = "border-rose-300 bg-rose-50";
+                else if (!isNaN(n) && n >= (q.max || 0)) color = "border-emerald-400 bg-emerald-50";
+                else color = "border-amber-300 bg-amber-50";
+              }
+              return (
+                <div key={q.id} className={`rounded-xl border-2 p-3 ${color}`}>
+                  <div className="flex justify-between gap-2 text-sm font-bold">
+                    <span className="mono text-indigo-700">{q.id}</span>
+                    <span className="text-slate-500">{q.type === "MC" ? `MC /${q.max || 1}${q.ans ? " · 參考" : ""}` : `LQ /${q.max || 1}`}</span>
+                  </div>
+                  {q.topicId && <div className="text-xs text-slate-500 mt-0.5">{q.topicId} {q.topicDesc || ""}</div>}
+                  <input
+                    data-pp-qid={q.id}
+                    className="mt-2 w-full border-2 rounded-lg px-3 py-2 text-lg font-black text-center uppercase"
+                    value={raw}
+                    placeholder={q.type === "MC" ? "A-D" : "分數"}
+                    onChange={e => {
+                      if (q.type === "MC") {
+                        const v = e.target.value.toUpperCase().replace(/[^A-D]/g, "").slice(0, 1);
+                        setAns(q.id, v, { jumpNext: v.length === 1 });
+                      } else {
+                        setAns(q.id, e.target.value, { jumpNext: false });
+                      }
+                    }}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        setAns(q.id, draft[q.id] ?? raw, { jumpNext: true });
+                      }
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 按年總覽 */}
+      {!yearGroups.length && (
+        <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無歷屆試卷題庫</div>
+      )}
+      {yearGroups.map(g => (
+        <div key={g.year} className="bg-white rounded-3xl border border-indigo-100 shadow-sm overflow-hidden">
+          <div className="p-5 md:p-6 flex flex-wrap justify-between gap-4 items-start border-b border-slate-100">
+            <div>
+              <h3 className="text-2xl font-black text-slate-800">{g.year} 年 DSE</h3>
+              <span className="inline-block mt-2 text-sm font-bold px-3 py-1 rounded-xl bg-indigo-50 text-indigo-700">
+                已完成 {g.doneCount} 份卷
+              </span>
+              {g.composite && (
+                <div className="mt-2 text-sm text-slate-500 font-semibold">
+                  {g.composite.p1m > 0 && <span>Paper1 {Math.round(g.composite.p1pct * 100)}%（{Math.round(g.composite.p1e)}/{Math.round(g.composite.p1m)}）</span>}
+                  {g.composite.p1m > 0 && g.composite.p2m > 0 && <span> · </span>}
+                  {g.composite.p2m > 0 && <span>Paper2 {Math.round(g.composite.p2pct * 100)}%</span>}
+                  <span className="text-slate-400"> · P1 60% + P2 20%（化算回 100）</span>
+                </div>
+              )}
+            </div>
+            {g.composite ? (
+              <div className="rounded-2xl bg-indigo-50 border border-indigo-100 px-5 py-3 text-center min-w-[120px]">
+                <div className="text-xs font-bold text-indigo-500">估算等級</div>
+                <div className={`text-4xl font-black mt-1 ${g.composite.grade.color.split(" ").filter(x=>x.startsWith("text-")).join(" ") || "text-indigo-700"}`}>
+                  {g.composite.grade.level}
+                </div>
+                <div className="text-sm font-bold text-slate-600 mt-1">得分率 {(g.composite.pct * 100).toFixed(1)}%</div>
+              </div>
+            ) : (
+              <div className="rounded-2xl bg-slate-50 border px-5 py-3 text-slate-400 text-sm font-bold">尚未入分</div>
+            )}
+          </div>
+
+          <div className="p-5 grid lg:grid-cols-5 gap-4">
+            <div className="lg:col-span-2 rounded-2xl bg-slate-50 border border-slate-100 p-3">
+              <div className="text-sm font-bold text-slate-500 mb-1 text-center">該年各課題能力分佈</div>
+              <div className="h-56">
+                <canvas ref={el => { chartRefs.current[g.year] = el; }} />
+              </div>
+              {!(domainByYear[g.year]?.labels?.length) && (
+                <div className="text-center text-slate-400 text-sm -mt-40">入分後顯示</div>
+              )}
+            </div>
+            <div className="lg:col-span-3 space-y-2">
+              {g.papers.map(p => (
+                <div key={p.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-50 border border-slate-100 px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-base font-bold text-slate-800 truncate">{p.title}</div>
+                    <div className="text-xs text-slate-400 mono">{p.id} · {p.kind}</div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {p.sc ? (
+                      <div className="text-right">
+                        <span className="text-lg font-black text-slate-800">{Math.round(p.sc.earned)}/{Math.round(p.sc.max)}</span>
+                        <span className={`ml-2 text-base font-black ${p.sc.pct >= 0.6 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {Math.round(p.sc.pct * 100)}%
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-sm font-bold text-slate-400">未入分</span>
+                    )}
+                    <button type="button" onClick={() => openEdit(p.id)}
+                      className="text-sm font-black px-3 py-1.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700">
+                      {p.sc ? "修改" : "輸入"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {/* 同年其他未在 group 的？ papers already from paperList */}
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {/* 無年份標籤的卷 */}
+      {yearFilter === "ALL" && paperList.some(p => !p.year) && (
+        <div className="bg-white rounded-2xl border p-5">
+          <div className="font-bold text-slate-700 mb-3">其他試卷</div>
+          <div className="space-y-2">
+            {paperList.filter(p => !p.year).map(p => {
+              const sc = scoreOfPaper(p.id);
+              return (
+                <div key={p.id} className="flex justify-between gap-3 items-center rounded-xl bg-slate-50 px-4 py-3">
+                  <div className="font-bold">{p.title}</div>
+                  <button type="button" className="text-sm font-bold bg-indigo-600 text-white px-3 py-1.5 rounded-lg" onClick={() => openEdit(p.id)}>
+                    {sc ? `${Math.round(sc.pct*100)}% · 修改` : "輸入"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function StudentShell({ student, onLogout }) {
   const [tab, setTab] = useState("home");
   const [loading, setLoading] = useState(true);
@@ -1324,10 +1731,13 @@ function StudentShell({ student, onLogout }) {
         {!loading && tab === "school" && (
           <SchoolProgressView student={student} maps={maps} scores={scores} makeup={makeup} />
         )}
-        {!loading && tab !== "home" && tab !== "school" && (
+        {!loading && tab === "pp" && (
+          <PastpaperStudentView student={student} maps={maps} scores={scores} setScores={setScores} />
+        )}
+        {!loading && tab !== "home" && tab !== "school" && tab !== "pp" && (
           <div className="bg-white rounded-3xl border p-12 text-center text-slate-400">
             <div className="text-lg font-bold text-slate-600 mb-2">{tabs.find(x => x.id === tab)?.label}</div>
-            下一批會接上此分頁（歷屆試題 / AI 補底 / 英雄榜）
+            下一批會接上此分頁（AI 補底 / 英雄榜）
           </div>
         )}
       </main>
