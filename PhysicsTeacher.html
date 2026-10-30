@@ -3880,8 +3880,6 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   const [mkMc, setMkMc] = useState(10);
   const [mkLq, setMkLq] = useState(0);
   const [mkLevel, setMkLevel] = useState("淺");
-  const [manualTid, setManualTid] = useState("");
-  const [manualLabel, setManualLabel] = useState("");
   const [promptTopicIds, setPromptTopicIds] = useState([]);
 
   useEffect(() => {
@@ -3921,8 +3919,9 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   useEffect(() => {
     if (!focus || !makeup[focus]) { setPromptTopicIds([]); return; }
     const topics = makeup[focus].topics || {};
-    const pending = Object.keys(topics).filter(tid => !topics[tid]?.done);
-    setPromptTopicIds(pending.length ? pending : Object.keys(topics));
+    const pending = Object.keys(topics).filter(tid => !topics[tid]?.done)
+      .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" }));
+    setPromptTopicIds(pending.length ? [pending[0]] : []);
   }, [focus]);
 
   const calcStudent = (sid) => {
@@ -3982,6 +3981,29 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
       }
     });
     return topics;
+  };
+
+  /** 本卷所有學習點（含得分率）；缺席／未答視為 null */
+  const examTopicPoolForStudent = (sid) => {
+    const rec = examScores[sid]?.[selectedExam] || {};
+    const topicBag = {};
+    qList.forEach(q => {
+      if (!q.topicId) return;
+      if (!topicBag[q.topicId]) topicBag[q.topicId] = { score: 0, max: 0, answered: 0, desc: q.topicDesc || "", qs: [] };
+      topicBag[q.topicId].desc = q.topicDesc || topicBag[q.topicId].desc;
+      topicBag[q.topicId].qs.push(q.id);
+      topicBag[q.topicId].max += (q.max || 1);
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      topicBag[q.topicId].score += sc;
+      topicBag[q.topicId].answered++;
+    });
+    return Object.entries(topicBag).map(([tid, v]) => {
+      const pct = v.answered > 0 && v.max > 0 ? Math.round((v.score / v.max) * 100) : null;
+      return { tid, label: v.desc || tid, pct, qs: v.qs, weak: pct == null || pct < 60 };
+    }).sort((a, b) => String(a.tid).localeCompare(String(b.tid), undefined, { numeric: true, sensitivity: "base" }));
   };
 
   const addStudent = (sid, category) => {
@@ -4222,89 +4244,96 @@ ${syllabus}
               </div>
 
               <div>
-                <div className="flex justify-between items-center mb-2">
-                  <div className="font-bold text-sm text-slate-700">補底課題（點選 = 今日已完成）</div>
-                  <button className="text-xs text-indigo-600 font-bold"
-                    onClick={() => {
-                      // 只「新增」考試弱項，不刪除已有（含手動加入）的學習點
-                      const extra = buildWeakTopicsForStudent(focus);
-                      const nextTopics = { ...focusTopics };
-                      let added = 0;
-                      Object.entries(extra).forEach(([tid, v]) => {
-                        if (!nextTopics[tid]) { nextTopics[tid] = v; added++; }
-                      });
-                      const next = { ...makeup, [focus]: { ...focusM, topics: nextTopics } };
-                      persist(next);
-                      alert(added ? `已加入 ${added} 個考試弱項（原有／手動學習點已保留）` : "沒有新的考試弱項；原有學習點已全部保留");
-                    }}>重掃弱項（只加不刪）</button>
-                </div>
-                <div className="flex flex-wrap gap-2 mb-2 items-end">
-                  <label className="text-[11px] font-bold">手動加入 topicId
-                    <input className="mt-0.5 block border rounded px-2 py-1 text-sm mono w-28" value={manualTid} onChange={e=>setManualTid(e.target.value)} placeholder="2.3.3" />
-                  </label>
-                  <label className="text-[11px] font-bold flex-1 min-w-[120px]">描述（可空）
-                    <input className="mt-0.5 block border rounded px-2 py-1 text-sm w-full" value={manualLabel} onChange={e=>setManualLabel(e.target.value)} placeholder="學習點說明" />
-                  </label>
-                  <button className="text-xs font-bold bg-slate-800 text-white px-3 py-1.5 rounded-lg"
-                    onClick={() => {
-                      const tid = (manualTid || "").trim();
-                      if (!tid) return alert("請輸入 topicId");
-                      if (focusTopics[tid]) return alert("此課題已在列表中");
-                      const nextTopics = { ...focusTopics, [tid]: { done: false, label: (manualLabel || "").trim() || tid, pct: null, manual: true } };
-                      const next = { ...makeup, [focus]: { ...focusM, topics: nextTopics, status: "PENDING" } };
-                      persist(next);
-                      setManualTid("");
-                      setManualLabel("");
-                    }}>加入</button>
-                </div>
-                {!focusIds.length && <p className="text-xs text-slate-400">未有課題。可「重掃弱項」或上方手動加入學習點。</p>}
-                <div className="space-y-1.5 max-h-48 overflow-auto">
-                  {sortTopicIds(focusIds).map(tid => {
-                    const tpc = focusTopics[tid];
+                <div className="font-bold text-sm text-slate-700 mb-1">本卷學習點（納入補底名單）</div>
+                <p className="text-[11px] text-slate-500 mb-2">&lt;60% 預設已勾；≥60% 可自行勾選加入。右側剔「今日已完成」。</p>
+                {(() => {
+                  const pool = examTopicPoolForStudent(focus);
+                  const weak = pool.filter(x => x.weak);
+                  const strong = pool.filter(x => !x.weak);
+                  const toggleInclude = (item) => {
+                    const nextTopics = { ...focusTopics };
+                    if (nextTopics[item.tid]) {
+                      delete nextTopics[item.tid];
+                    } else {
+                      nextTopics[item.tid] = {
+                        done: false,
+                        label: item.label,
+                        pct: item.pct,
+                        qs: item.qs
+                      };
+                    }
+                    const ids = Object.keys(nextTopics);
+                    const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
+                    persist({
+                      ...makeup,
+                      [focus]: {
+                        ...focusM,
+                        topics: nextTopics,
+                        status: allDone ? "DONE" : "PENDING",
+                        updatedAt: new Date().toISOString()
+                      }
+                    });
+                  };
+                  const markDone = (tid) => {
+                    if (!focusTopics[tid]) return;
+                    const nextTopics = {
+                      ...focusTopics,
+                      [tid]: { ...focusTopics[tid], done: !focusTopics[tid].done }
+                    };
+                    const ids = Object.keys(nextTopics);
+                    const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
+                    persist({
+                      ...makeup,
+                      [focus]: {
+                        ...focusM,
+                        topics: nextTopics,
+                        status: allDone ? "DONE" : "PENDING",
+                        updatedAt: new Date().toISOString()
+                      }
+                    });
+                  };
+                  const row = (item, zone) => {
+                    const included = !!focusTopics[item.tid];
+                    const done = included && focusTopics[item.tid]?.done;
                     return (
-                      <label key={tid} className={`flex items-start gap-2 border rounded-xl p-2 cursor-pointer ${tpc.done?"bg-emerald-50 border-emerald-200":"bg-white border-slate-100"}`}>
-                        <input type="checkbox" className="mt-1" checked={!!tpc.done}
-                          onChange={() => {
-                            const nextTopics = {
-                              ...focusTopics,
-                              [tid]: { ...tpc, done: !tpc.done }
-                            };
-                            const ids = Object.keys(nextTopics);
-                            const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
-                            const next = {
-                              ...makeup,
-                              [focus]: {
-                                ...focusM,
-                                topics: nextTopics,
-                                status: allDone ? "DONE" : "PENDING",
-                                updatedAt: new Date().toISOString()
-                              }
-                            };
-                            persist(next);
-                          }} />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-bold">
-                            <span className="mono text-purple-700">{tid}</span>{" "}
-                            {tpc.label || ""}
-                            {tpc.manual && <span className="ml-1 text-[10px] text-slate-400">手動</span>}
+                      <div key={item.tid} className={`flex items-center gap-2 border rounded-xl p-2 ${done?"bg-emerald-50 border-emerald-200":included?"bg-white border-purple-200":"bg-slate-50 border-slate-100"}`}>
+                        <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                          <input type="checkbox" checked={included} onChange={() => toggleInclude(item)} />
+                          <div className="min-w-0">
+                            <div className="text-sm font-bold">
+                              <span className="mono text-purple-700">{item.tid}</span>{" "}
+                              <span className="text-slate-700">{item.label}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {item.pct == null ? "未答／無分" : `得分率 ${item.pct}%`}
+                              {included ? (done ? " · 今日已完成" : " · 待補") : ""}
+                            </div>
                           </div>
-                          <div className="text-[11px] text-slate-500">
-                            {tpc.pct != null ? `考試約 ${tpc.pct}%` : "手動學習點"}
-                            {tpc.done ? " · 已完成" : " · 待補"}
-                          </div>
-                        </div>
-                        <button type="button" className="text-[10px] text-rose-500 font-bold" onClick={e => {
-                          e.preventDefault();
-                          const nextTopics = { ...focusTopics };
-                          delete nextTopics[tid];
-                          const ids = Object.keys(nextTopics);
-                          const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
-                          persist({ ...makeup, [focus]: { ...focusM, topics: nextTopics, status: allDone ? "DONE" : "PENDING" } });
-                        }}>刪</button>
-                      </label>
+                        </label>
+                        {included && (
+                          <button type="button"
+                            className={`text-[11px] font-bold px-2 py-1 rounded-lg border ${done?"bg-emerald-600 text-white border-emerald-700":"bg-white text-slate-600 border-slate-200"}`}
+                            onClick={() => markDone(item.tid)}>
+                            {done ? "已完成" : "標完成"}
+                          </button>
+                        )}
+                      </div>
                     );
-                  })}
-                </div>
+                  };
+                  return (
+                    <div className="space-y-3 max-h-64 overflow-auto">
+                      <div>
+                        <div className="text-xs font-black text-rose-700 mb-1">弱項 &lt; 60%（預設納入）· {weak.length}</div>
+                        <div className="space-y-1.5">{weak.length ? weak.map(i => row(i, "weak")) : <p className="text-xs text-slate-400">無</p>}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs font-black text-emerald-700 mb-1">≥ 60%（可手動勾選加入）· {strong.length}</div>
+                        <div className="space-y-1.5">{strong.length ? strong.map(i => row(i, "strong")) : <p className="text-xs text-slate-400">無</p>}</div>
+                      </div>
+                      {!pool.length && <p className="text-xs text-slate-400">此卷題目未設 topicId。</p>}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="rounded-xl border-2 border-purple-200 bg-purple-50 p-4 space-y-3">
