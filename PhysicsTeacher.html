@@ -3612,16 +3612,16 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                 <button key={s.id} onClick={() => setSelectedStudentId(s.id)}
                   className={`w-full text-left px-3 py-2 rounded-xl border text-sm ${selectedStudentId===s.id?"border-purple-400 bg-purple-50 ring-1 ring-purple-200":"border-slate-100 hover:bg-slate-50"}`}>
                   <div className="flex justify-between items-center gap-2">
-                    <span className="font-semibold"><b>{s.class}-{s.num}</b> {s.name}</span>
-                    {!st && <span className="text-[10px] text-slate-400">未入分</span>}
+                    <span className="font-bold text-base"><b>{s.class}-{s.num}</b> {s.name}</span>
+                    {!st && <span className="text-xs text-slate-400">未入分</span>}
                     {st && (
-                      <span className={`text-[11px] font-black px-1.5 py-0.5 rounded border ${wCls}`}>
-                        加權 {st.weighted.toFixed(1)}
+                      <span className={`text-lg font-black px-2 py-0.5 rounded-lg border-2 ${wCls}`}>
+                        {st.weighted.toFixed(1)} <span className="text-sm font-bold opacity-70">/ 100</span>
                       </span>
                     )}
                   </div>
                   {st && (
-                    <div className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-bold">
+                    <div className="mt-1 flex flex-wrap gap-1.5 text-xs font-bold">
                       <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-100">MC {st.mcScore}/{st.mcMax}</span>
                       <span className="px-1.5 py-0.5 rounded bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-100">LQ {st.lqScore}/{st.lqMax}</span>
                       <span className="px-1.5 py-0.5 rounded bg-slate-50 text-slate-600 border border-slate-200">卷面 {st.total}/{st.max}</span>
@@ -3638,14 +3638,33 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
           ) : (
             <div className="space-y-3">
               <div className="flex flex-wrap justify-between items-center gap-2">
-                <div className="font-bold">{activeStudents.find(x=>x.id===selectedStudentId)?.name} · {selectedExam}</div>
+                <div className="font-black text-lg">{activeStudents.find(x=>x.id===selectedStudentId)?.name}
+                  <span className="text-slate-400 font-bold text-sm ml-2">{selectedExam}</span>
+                </div>
                 <div className="flex items-center gap-2">
-                  {curStats && <span className="text-sm font-bold text-purple-700">加權 {curStats.weighted.toFixed(1)}（MC {curStats.mcScore}/{curStats.mcMax} · LQ {curStats.lqScore}/{curStats.lqMax}）</span>}
-                  <span className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":""}</span>
-                  <button className="text-xs font-bold text-rose-600" onClick={clearStudent}>清除此卷</button>
+                  <span className="text-sm text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":""}</span>
+                  <button className="text-sm font-bold text-rose-600" onClick={clearStudent}>清除此卷</button>
                 </div>
               </div>
-              <div className="space-y-2 max-h-[55vh] overflow-auto">
+              {curStats && (
+                <div className="rounded-2xl border-2 border-purple-300 bg-purple-50 px-4 py-3 flex flex-wrap items-center gap-4">
+                  <div>
+                    <div className="text-xs font-bold text-purple-600 uppercase tracking-wide">抄寫用 · 加權分</div>
+                    <div className="text-4xl font-black text-purple-800 leading-none mt-1">
+                      {curStats.weighted.toFixed(1)}<span className="text-xl text-purple-500 font-bold"> / 100</span>
+                    </div>
+                  </div>
+                  <div className="text-sm font-bold text-slate-700 space-y-0.5">
+                    <div>MC {curStats.mcScore}/{curStats.mcMax}</div>
+                    <div>LQ {curStats.lqScore}/{curStats.lqMax}</div>
+                    <div className="text-slate-500">卷面 {curStats.total}/{curStats.max}</div>
+                  </div>
+                </div>
+              )}
+              {!curStats && (
+                <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-3 text-slate-400 text-sm font-bold">尚未入分</div>
+              )}
+              <div className="space-y-2 max-h-[50vh] overflow-auto">
                 {qList.map(q => {
                   const raw = rec[q.id];
                   const has = raw !== undefined && raw !== null && String(raw).trim() !== "";
@@ -3664,21 +3683,21 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                   return (
                     <div key={q.id} className="border rounded-xl p-2 flex gap-2 items-center">
                       <div className="w-20 shrink-0">
-                        <div className="text-xs font-bold mono">{q.id}</div>
+                        <div className="text-sm font-black mono">{q.id}</div>
                         <div className="text-[10px] text-slate-400">{q.type}</div>
                       </div>
                       <div className="flex-1 text-xs text-slate-600 truncate" title={q.topicDesc}>{q.topicId} {q.topicDesc}</div>
                       <div className="flex items-center gap-1">
                         {q.type === "MC" ? (
                           <input data-ex-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}}
-                            className={`w-14 border-2 rounded px-1 py-1 text-center font-bold uppercase ${scoreColor}`}
+                            className={`w-16 border-2 rounded-lg px-1 py-1.5 text-center text-lg font-black uppercase ${scoreColor}`}
                             maxLength={1} value={raw ?? ""}
                             onChange={e=>setQVal(q.id, e.target.value, q)}
                             onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
                           />
                         ) : (
                           <input data-ex-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}} type="number"
-                            className={`w-16 border-2 rounded px-1 py-1 text-center font-bold ${scoreColor}`}
+                            className={`w-20 border-2 rounded-lg px-1 py-1.5 text-center text-lg font-black ${scoreColor}`}
                             value={raw ?? ""}
                             onChange={e=>setQVal(q.id, e.target.value, q)}
                             onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
@@ -3858,9 +3877,11 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   const [filter, setFilter] = useState("active"); // active | done | all
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [mkMc, setMkMc] = useState(8);
-  const [mkLq, setMkLq] = useState(1);
+  const [mkMc, setMkMc] = useState(10);
+  const [mkLq, setMkLq] = useState(0);
   const [mkLevel, setMkLevel] = useState("淺");
+  const [manualTid, setManualTid] = useState("");
+  const [manualLabel, setManualLabel] = useState("");
   const [promptTopicIds, setPromptTopicIds] = useState([]);
 
   useEffect(() => {
@@ -4025,24 +4046,30 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
     return prog(a) - prog(b);
   });
 
+  const sortTopicIds = (ids) => {
+    return [...ids].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" }));
+  };
+
   const buildPrompt = (sid) => {
     const m = makeup[sid] || {};
     const s = activeStudents.find(x => x.id === sid);
     const name = s ? `${s.class}-${s.num} ${s.name}` : sid;
     const topics = m.topics || {};
-    const chosen = (promptTopicIds.length ? promptTopicIds : Object.keys(topics).filter(tid => !topics[tid]?.done))
+    let chosen = (promptTopicIds.length ? promptTopicIds : Object.keys(topics).filter(tid => !topics[tid]?.done))
       .filter(tid => topics[tid]);
-    if (!chosen.length) return "請先勾選今次要補的課題。";
-    const lines = chosen.map(tid => {
-      const t = topics[tid];
-      return `- [${tid}] ${t.label || ""}（考試得分率約 ${t.pct != null ? t.pct + "%" : "—"}；狀態：${t.done ? "已完成" : "待補"}）`;
-    }).join("\n");
+    chosen = sortTopicIds(chosen);
+    const lines = chosen.length
+      ? chosen.map(tid => {
+          const tp = topics[tid];
+          return `- [${tid}] ${tp.label || ""}（考試得分率約 ${tp.pct != null ? tp.pct + "%" : "—"}；狀態：${tp.done ? "已完成" : "待補"}）`;
+        }).join("\n")
+      : "- （尚未指定課題：請按考試範圍與學生程度出由淺入深的鞏固練習）";
     const syllabus = getSyllabusTableText(chosen);
     return `【身份】你是香港 DSE 物理科老師，正在為學生進行【分日補底／補考練習】。
 
 【學生】${name}
 【考試】${map?.title || selectedExam}
-【今次只處理以下課題】（其餘日後再補，不要一次出完全部）
+【今次只處理以下課題】（按 topicId 排序；其餘日後再補，不要一次出完全部）
 ${lines}
 
 【課程大綱參考】
@@ -4199,18 +4226,40 @@ ${syllabus}
                   <div className="font-bold text-sm text-slate-700">補底課題（點選 = 今日已完成）</div>
                   <button className="text-xs text-indigo-600 font-bold"
                     onClick={() => {
+                      // 只「新增」考試弱項，不刪除已有（含手動加入）的學習點
                       const extra = buildWeakTopicsForStudent(focus);
                       const nextTopics = { ...focusTopics };
+                      let added = 0;
                       Object.entries(extra).forEach(([tid, v]) => {
-                        if (!nextTopics[tid]) nextTopics[tid] = v;
+                        if (!nextTopics[tid]) { nextTopics[tid] = v; added++; }
                       });
                       const next = { ...makeup, [focus]: { ...focusM, topics: nextTopics } };
                       persist(next);
-                    }}>由考試成績重掃弱項</button>
+                      alert(added ? `已加入 ${added} 個考試弱項（原有／手動學習點已保留）` : "沒有新的考試弱項；原有學習點已全部保留");
+                    }}>重掃弱項（只加不刪）</button>
                 </div>
-                {!focusIds.length && <p className="text-xs text-slate-400">未有課題。可「重掃弱項」或手動在下方加入。</p>}
+                <div className="flex flex-wrap gap-2 mb-2 items-end">
+                  <label className="text-[11px] font-bold">手動加入 topicId
+                    <input className="mt-0.5 block border rounded px-2 py-1 text-sm mono w-28" value={manualTid} onChange={e=>setManualTid(e.target.value)} placeholder="2.3.3" />
+                  </label>
+                  <label className="text-[11px] font-bold flex-1 min-w-[120px]">描述（可空）
+                    <input className="mt-0.5 block border rounded px-2 py-1 text-sm w-full" value={manualLabel} onChange={e=>setManualLabel(e.target.value)} placeholder="學習點說明" />
+                  </label>
+                  <button className="text-xs font-bold bg-slate-800 text-white px-3 py-1.5 rounded-lg"
+                    onClick={() => {
+                      const tid = (manualTid || "").trim();
+                      if (!tid) return alert("請輸入 topicId");
+                      if (focusTopics[tid]) return alert("此課題已在列表中");
+                      const nextTopics = { ...focusTopics, [tid]: { done: false, label: (manualLabel || "").trim() || tid, pct: null, manual: true } };
+                      const next = { ...makeup, [focus]: { ...focusM, topics: nextTopics, status: "PENDING" } };
+                      persist(next);
+                      setManualTid("");
+                      setManualLabel("");
+                    }}>加入</button>
+                </div>
+                {!focusIds.length && <p className="text-xs text-slate-400">未有課題。可「重掃弱項」或上方手動加入學習點。</p>}
                 <div className="space-y-1.5 max-h-48 overflow-auto">
-                  {focusIds.map(tid => {
+                  {sortTopicIds(focusIds).map(tid => {
                     const tpc = focusTopics[tid];
                     return (
                       <label key={tid} className={`flex items-start gap-2 border rounded-xl p-2 cursor-pointer ${tpc.done?"bg-emerald-50 border-emerald-200":"bg-white border-slate-100"}`}>
@@ -4237,12 +4286,21 @@ ${syllabus}
                           <div className="text-sm font-bold">
                             <span className="mono text-purple-700">{tid}</span>{" "}
                             {tpc.label || ""}
+                            {tpc.manual && <span className="ml-1 text-[10px] text-slate-400">手動</span>}
                           </div>
                           <div className="text-[11px] text-slate-500">
-                            考試約 {tpc.pct != null ? tpc.pct + "%" : "—"}
+                            {tpc.pct != null ? `考試約 ${tpc.pct}%` : "手動學習點"}
                             {tpc.done ? " · 已完成" : " · 待補"}
                           </div>
                         </div>
+                        <button type="button" className="text-[10px] text-rose-500 font-bold" onClick={e => {
+                          e.preventDefault();
+                          const nextTopics = { ...focusTopics };
+                          delete nextTopics[tid];
+                          const ids = Object.keys(nextTopics);
+                          const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
+                          persist({ ...makeup, [focus]: { ...focusM, topics: nextTopics, status: allDone ? "DONE" : "PENDING" } });
+                        }}>刪</button>
                       </label>
                     );
                   })}
@@ -4250,10 +4308,10 @@ ${syllabus}
               </div>
 
               <div className="rounded-xl border-2 border-purple-200 bg-purple-50 p-4 space-y-3">
-                <div className="font-bold text-purple-900 text-sm">今次補底 · 出題 Prompt（只含未完成／你勾選的課題）</div>
-                <p className="text-[11px] text-purple-800">時間有限可只選 1–2 個 topic；完成後剔低，下日再繼續。</p>
+                <div className="font-bold text-purple-900 text-sm">今次補底 · 出題 Prompt（topicId 按順序；未勾則用未完成課題）</div>
+                <p className="text-[11px] text-purple-800">時間有限可只選 1–2 個 topic；未選也可複製（會提示）。</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {focusIds.map(tid => {
+                  {sortTopicIds(focusIds).map(tid => {
                     const on = promptTopicIds.includes(tid);
                     return (
                       <button key={tid} type="button"
@@ -4278,8 +4336,17 @@ ${syllabus}
                   </label>
                 </div>
                 <button className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 rounded-xl text-sm"
-                  onClick={() => navigator.clipboard.writeText(buildPrompt(focus)).then(()=>alert("已複製今次補底 Prompt")).catch(()=>alert("失敗"))}>
-                  複製 Canvas 互動補底 Prompt（{promptTopicIds.length || "未完成"} 課題）
+                  onClick={() => {
+                    const topics = focusTopics || {};
+                    const chosen = promptTopicIds.length
+                      ? promptTopicIds
+                      : Object.keys(topics).filter(tid => !topics[tid]?.done);
+                    if (!chosen.length) {
+                      if (!confirm("尚未勾選課題，也沒有「未完成」課題。\n仍要複製通用補底 Prompt？")) return;
+                    }
+                    navigator.clipboard.writeText(buildPrompt(focus)).then(()=>alert("已複製今次補底 Prompt" + (chosen.length ? `（${chosen.length} 課題）` : "（未指定課題）"))).catch(()=>alert("失敗"));
+                  }}>
+                  複製 Canvas 互動補底 Prompt
                 </button>
               </div>
             </>
