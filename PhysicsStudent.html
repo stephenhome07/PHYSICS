@@ -1655,7 +1655,11 @@ function collectTopicStatsFromPapers(items) {
   const topicBag = {};
   items.forEach(({ map, rec }) => {
     if (!map?.questions) return;
-    const body = rec || {};
+    const rawRec = rec || {};
+    // 功課成績多在 rec.scores；考試／小測／PP 多為扁平
+    const body = (rawRec.scores && typeof rawRec.scores === "object")
+      ? { ...rawRec, ...rawRec.scores }
+      : rawRec;
     map.questions.forEach(q => {
       const tid = q.topicId || "（無）";
       const raw = body[q.id];
@@ -1858,15 +1862,20 @@ ${extra.notes ? "5. 另附溫習筆記：條列重點、公式、常見陷阱。
         <div className="grid sm:grid-cols-2 gap-2 max-h-64 overflow-auto">
           {sourceItems.map(r => {
             const on = selectedIds.includes(r.id);
+            const pct = r.weighted != null ? r.weighted : (r.sc ? r.sc.pct * 100 : null);
             const scoreTxt = r.weighted != null
               ? `${r.weighted.toFixed(1)}/100`
-              : (r.sc ? `${Math.round(r.sc.pct * 100)}%` : "無分");
+              : (r.sc ? `${Math.round(r.sc.earned)}/${Math.round(r.sc.max)}` : "無分");
+            const pctCls = pct == null ? "text-slate-400" : pct >= 70 ? "text-emerald-600" : pct >= 50 ? "text-amber-600" : "text-rose-600";
             return (
               <label key={r.id} className={`flex items-center gap-3 rounded-2xl border-2 px-3 py-3 cursor-pointer ${on ? "border-indigo-500 bg-indigo-50" : "border-slate-100 bg-slate-50"}`}>
                 <input type="checkbox" checked={on} onChange={() => toggleId(r.id)} className="w-5 h-5" />
                 <div className="min-w-0 flex-1">
                   <div className="font-bold text-slate-800 truncate text-base">{r.title}</div>
                   <div className="text-sm text-slate-500">{scoreTxt}</div>
+                </div>
+                <div className={`text-2xl font-black tabular-nums ${pctCls}`}>
+                  {pct != null ? Math.round(pct) + "%" : "—"}
                 </div>
               </label>
             );
@@ -1956,6 +1965,127 @@ ${extra.notes ? "5. 另附溫習筆記：條列重點、公式、常見陷阱。
 }
 
 
+
+function computePeerComponent(maps, scoresTree, cohort) {
+  // returns { hw, quiz, exam, pp, overall }
+  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  const hwPcts = [], quizPcts = [], examWs = [], ppPcts = [];
+  Object.entries(maps.homework || {}).forEach(([id, m]) => {
+    if (!mapVisible(m, cohort) && !(m.cohort === cohort)) return;
+    // 排名用：群組相符或無群組
+    if (m.cohort && m.cohort !== "" && m.cohort !== "所有學生" && m.cohort !== cohort) return;
+    const sc = scoreOfRec(m, scoresTree.homeworks?.[id]);
+    if (sc) hwPcts.push(sc.pct);
+  });
+  Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+    if (m.cohort && m.cohort !== "" && m.cohort !== "所有學生" && m.cohort !== cohort) return;
+    const sc = scoreOfRec(m, scoresTree.quizzes?.[id]);
+    if (sc) quizPcts.push(sc.pct);
+  });
+  Object.entries(maps.exam || {}).forEach(([id, m]) => {
+    if (m.cohort && m.cohort !== "" && m.cohort !== "所有學生" && m.cohort !== cohort) return;
+    const st = examWeighted(m, scoresTree.exams?.[id]);
+    if (st) examWs.push(st.weighted / 100);
+  });
+  Object.entries(maps.pastpaper || {}).forEach(([id, m]) => {
+    const sc = scoreOfRec(m, scoresTree.pastpapers?.[id]);
+    if (sc) ppPcts.push(sc.pct);
+  });
+  const hw = avg(hwPcts), quiz = avg(quizPcts), exam = avg(examWs), pp = avg(ppPcts);
+  const parts = [];
+  if (hw != null) parts.push({ w: 20, v: hw });
+  if (quiz != null) parts.push({ w: 30, v: quiz });
+  if (exam != null) parts.push({ w: 50, v: exam });
+  const sumW = parts.reduce((a, p) => a + p.w, 0);
+  const overall = sumW ? parts.reduce((a, p) => a + p.v * (p.w / sumW), 0) : null;
+  return { hw, quiz, exam, pp, overall };
+}
+
+function RankBoardView({ student, maps, cohortPeers, peerScores }) {
+  const [mode, setMode] = useState("overall"); // overall | hw | quiz | exam | pp
+
+  const rows = useMemo(() => {
+    const key = mode === "overall" ? "overall" : mode === "hw" ? "hw" : mode === "quiz" ? "quiz" : mode === "exam" ? "exam" : "pp";
+    const list = (cohortPeers || []).map(s => {
+      const ps = peerScores?.[s.id];
+      const val = ps ? ps[key] : null;
+      return { id: s.id, name: s.name, class: s.class, num: s.num, val, detail: ps };
+    }).filter(r => r.val != null);
+    list.sort((a, b) => b.val - a.val);
+    const n = list.length;
+    // 隱藏最後 25%（含自己）
+    const cutoff = Math.ceil(n * 0.75);
+    const visible = list.slice(0, Math.max(cutoff, 0));
+    return visible.map((r, i) => ({ ...r, rank: i + 1, total: n }));
+  }, [cohortPeers, peerScores, mode]);
+
+  const modes = [
+    { id: "overall", label: "綜合排名" },
+    { id: "hw", label: "功課" },
+    { id: "quiz", label: "小測" },
+    { id: "exam", label: "統考" },
+    { id: "pp", label: "Pastpaper" }
+  ];
+
+  const medal = (rank) => {
+    if (rank === 1) return "🥇";
+    if (rank === 2) return "🥈";
+    if (rank === 3) return "🥉";
+    return String(rank);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">🏆 班級戰力排名</h2>
+        <p className="text-base text-slate-500 mt-1">
+          綜合 = 功課 20% + 小測 30% + 統考 50%（缺項會在現有類別間重算）。Pastpaper 獨立。最尾約 25% 不顯示。
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {modes.map(m => (
+          <button key={m.id} type="button" onClick={() => setMode(m.id)}
+            className={`px-5 py-2.5 rounded-full text-base font-black border-2 ${mode === m.id ? "bg-amber-400 text-amber-950 border-amber-500" : "bg-white text-slate-600 border-slate-200"}`}>
+            {m.label}
+          </button>
+        ))}
+      </div>
+      <div className="bg-white rounded-3xl border shadow-sm overflow-hidden">
+        {!rows.length && (
+          <div className="p-12 text-center text-slate-400 text-lg">暫無足夠成績可排名</div>
+        )}
+        {rows.map(r => {
+          const isYou = r.id === student.id;
+          return (
+            <div key={r.id} className={`flex flex-wrap items-center gap-3 px-5 py-4 border-b border-slate-100 ${isYou ? "bg-amber-50" : ""}`}>
+              <div className={`w-10 text-center text-xl font-black ${r.rank <= 3 ? "text-amber-500" : "text-slate-400"}`}>
+                {medal(r.rank)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-lg font-black text-slate-800 flex items-center gap-2">
+                  {isYou && <span className="text-xs font-black bg-amber-400 text-amber-950 px-2 py-0.5 rounded-md">YOU</span>}
+                  {r.name}
+                </div>
+                {mode === "overall" && r.detail && (
+                  <div className="text-sm text-slate-500 mt-0.5">
+                    {r.detail.hw != null && <span className="mr-2">功課 {Math.round(r.detail.hw * 100)}%</span>}
+                    {r.detail.quiz != null && <span className="mr-2">小測 {Math.round(r.detail.quiz * 100)}%</span>}
+                    {r.detail.exam != null && <span className="mr-2">統考 {Math.round(r.detail.exam * 100)}%</span>}
+                  </div>
+                )}
+              </div>
+              <div className="text-2xl font-black text-amber-600 tabular-nums">
+                {(r.val * 100).toFixed(1)}%
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
 function StudentShell({ student, onLogout }) {
   const [tab, setTab] = useState("home");
   const [aiSource, setAiSource] = useState("hw");
@@ -1995,42 +2125,22 @@ function StudentShell({ student, onLogout }) {
         const all = await loadAllStudents();
         const peers = all.filter(s => s.cohort && s.cohort === student.cohort);
         setCohortPeers(peers);
-        // compute peer overall in background chunks
         const peerOut = {};
         const chunk = 8;
+        const mapsBundle = { homework: hw, quiz, exam, pastpaper: pp };
         for (let i = 0; i < peers.length; i += chunk) {
           const slice = peers.slice(i, i + chunk);
           await Promise.all(slice.map(async s => {
             try {
-              const [sh, sq, se] = await Promise.all([
+              const [sh, sq, se, sp] = await Promise.all([
                 loadSubScores(s.id, "homeworks"),
                 loadSubScores(s.id, "quizzes"),
-                loadSubScores(s.id, "exams")
+                loadSubScores(s.id, "exams"),
+                loadSubScores(s.id, "pastpapers")
               ]);
-              const hwPcts = [], quizPcts = [], examWs = [];
-              Object.entries(hw).forEach(([id, m]) => {
-                if (!mapVisible(m, s.cohort)) return;
-                const sc = scoreOfRec(m, sh[id]);
-                if (sc) hwPcts.push(sc.pct);
-              });
-              Object.entries(quiz).forEach(([id, m]) => {
-                if (!mapVisible(m, s.cohort)) return;
-                const sc = scoreOfRec(m, sq[id]);
-                if (sc) quizPcts.push(sc.pct);
-              });
-              Object.entries(exam).forEach(([id, m]) => {
-                if (!mapVisible(m, s.cohort)) return;
-                const st = examWeighted(m, se[id]);
-                if (st) examWs.push(st.weighted / 100);
-              });
-              const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
-              const parts = [];
-              const h = avg(hwPcts), q = avg(quizPcts), e = avg(examWs);
-              if (h != null) parts.push({ w: 20, v: h });
-              if (q != null) parts.push({ w: 30, v: q });
-              if (e != null) parts.push({ w: 50, v: e });
-              const sumW = parts.reduce((a, p) => a + p.w, 0);
-              peerOut[s.id] = { overall: sumW ? parts.reduce((a, p) => a + p.v * (p.w / sumW), 0) : null };
+              peerOut[s.id] = computePeerComponent(mapsBundle, {
+                homeworks: sh, quizzes: sq, exams: se, pastpapers: sp
+              }, s.cohort);
             } catch (err) { console.warn(err); }
           }));
         }
@@ -2089,10 +2199,13 @@ function StudentShell({ student, onLogout }) {
         {!loading && tab === "ai" && (
           <AiReviewView student={student} maps={maps} scores={scores} initialSource={aiSource} />
         )}
-        {!loading && tab !== "home" && tab !== "school" && tab !== "pp" && tab !== "ai" && (
+        {!loading && tab === "rank" && (
+          <RankBoardView student={student} maps={maps} cohortPeers={cohortPeers} peerScores={peerScores} />
+        )}
+        {!loading && tab !== "home" && tab !== "school" && tab !== "pp" && tab !== "ai" && tab !== "rank" && (
           <div className="bg-white rounded-3xl border p-12 text-center text-slate-400">
             <div className="text-lg font-bold text-slate-600 mb-2">{tabs.find(x => x.id === tab)?.label}</div>
-            下一批會接上此分頁（英雄榜）
+            功能開發中
           </div>
         )}
       </main>
