@@ -375,15 +375,28 @@ function estimateDseLevel(pct01) {
 function domainFromTopicId(tid) {
   if (!tid) return "其他";
   const s = String(tid);
-  if (s.startsWith("E3") || s.startsWith("e3")) return "E3 能量";
-  if (s.startsWith("E4") || s.startsWith("e4")) return "E4 醫學";
+  if (s.startsWith("E3") || s.startsWith("e3")) return "E3 能量與能源使用";
+  if (s.startsWith("E4") || s.startsWith("e4")) return "E4 原子世界／醫學物理";
   const c = s.charAt(0);
-  if (c === "1") return "1 熱";
-  if (c === "2") return "2 力";
-  if (c === "3") return "3 波";
-  if (c === "4") return "4 電";
-  if (c === "5") return "5 放射";
+  if (c === "1") return "1 熱學";
+  if (c === "2") return "2 力學";
+  if (c === "3") return "3 波動學";
+  if (c === "4") return "4 電磁學";
+  if (c === "5") return "5 放射學";
   return "其他";
+}
+
+function syllabusLabel(tid) {
+  const info = SYLLABUS_TOPICS && SYLLABUS_TOPICS[tid];
+  if (!info) return "";
+  if (typeof info === "object" && info) return info.topic || info.name || info.desc || "";
+  return String(info);
+}
+
+function syllabusDesc(tid) {
+  const info = SYLLABUS_TOPICS && SYLLABUS_TOPICS[tid];
+  if (!info || typeof info !== "object") return "";
+  return info.desc || "";
 }
 
 /** 考試是否適用該群組：無 cohort = 全組通用 */
@@ -4671,7 +4684,15 @@ function PastpaperInputAnalysisView({ activeStudents, pastpaperMaps, pastpaperSc
     const bag = {};
     qStats.forEach(q => {
       const tid = q.topicId || "（無）";
-      if (!bag[tid]) bag[tid] = { topicId: tid, score: 0, max: 0, descs: new Set() };
+      if (!bag[tid]) bag[tid] = { topicId: tid, score: 0, max: 0, descs: new Set(), qTips: [] };
+      // 收集題目詳情（無論有無作答統計都可 hover 看）
+      bag[tid].qTips.push({
+        id: q.id,
+        desc: q.topicDesc || q.desc || "",
+        type: q.type,
+        pct: q.pct,
+        attempts: q.attempts
+      });
       if (q.passRate == null) return;
       bag[tid].score += q.passRate * (q.max || 1) * q.attempts;
       bag[tid].max += (q.max || 1) * q.attempts;
@@ -4680,7 +4701,9 @@ function PastpaperInputAnalysisView({ activeStudents, pastpaperMaps, pastpaperSc
     return Object.values(bag).map(x => ({
       ...x,
       pct: x.max > 0 ? (x.score / x.max) * 100 : null,
-      descs: Array.from(x.descs)
+      descs: Array.from(x.descs),
+      name: syllabusLabel(x.topicId),
+      syDesc: syllabusDesc(x.topicId)
     })).sort((a, b) => (a.pct ?? 999) - (b.pct ?? 999));
   }, [qStats]);
 
@@ -4843,7 +4866,7 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             <div className="space-y-2">
               {macro.map(d => (
                 <div key={d.domain} className="flex items-center gap-2 text-sm">
-                  <span className="w-20 font-bold shrink-0">{d.domain}</span>
+                  <span className="w-36 font-bold shrink-0 text-xs sm:text-sm">{d.domain}</span>
                   <div className="flex-1 h-3 rounded-full bg-slate-100 overflow-hidden">
                     <div className={`h-full ${d.pct!=null&&d.pct<40?"bg-rose-500":d.pct<60?"bg-amber-400":"bg-emerald-500"}`} style={{width: (d.pct||0)+"%"}} />
                   </div>
@@ -4853,19 +4876,53 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             </div>
           )}
         </div>
-        <div className="bg-white rounded-2xl border p-4 max-h-64 overflow-auto">
-          <h3 className="font-bold text-pink-700 mb-2">各子課題表現剖析 (Micro)</h3>
+        <div className="bg-white rounded-2xl border p-4 max-h-80 overflow-auto">
+          <h3 className="font-bold text-pink-700 mb-1">各子課題表現剖析 (Micro)</h3>
+          <p className="text-[11px] text-slate-500 mb-2">滑鼠移到課題上可看相關題目詳情；下方為大綱／題目描述。</p>
           {!micro.length ? <p className="text-slate-400 text-sm">尚無數據</p> : (
-            <div className="space-y-1.5">
-              {micro.slice(0, 24).map(t => (
-                <div key={t.topicId} className="flex items-center gap-2 text-xs">
-                  <span className="mono font-bold w-14 shrink-0">{t.topicId}</span>
-                  <div className="flex-1 h-2 rounded-full bg-slate-100 overflow-hidden">
-                    <div className={`h-full ${t.pct!=null&&t.pct<40?"bg-rose-500":t.pct<60?"bg-amber-400":"bg-emerald-500"}`} style={{width: (t.pct||0)+"%"}} />
+            <div className="space-y-3">
+              {micro.slice(0, 30).map(row => {
+                const tip = [
+                  row.name ? `大綱：${row.name}` : "",
+                  row.syDesc ? `要求：${row.syDesc}` : "",
+                  (row.qTips || []).map(q => `${q.id} (${q.type}${q.pct!=null?" "+Math.round(q.pct)+"%":""}) ${q.desc || ""}`).join("\n")
+                ].filter(Boolean).join("\n");
+                return (
+                  <div key={row.topicId} className="group relative border border-slate-100 rounded-xl p-2 hover:border-pink-200 hover:bg-pink-50/40 transition" title={tip}>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="mono font-black text-pink-800 shrink-0">{row.topicId}</span>
+                      <div className="flex-1 h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                        <div className={`h-full ${row.pct!=null&&row.pct<40?"bg-rose-500":row.pct<60?"bg-amber-400":"bg-emerald-500"}`} style={{width: (row.pct||0)+"%"}} />
+                      </div>
+                      <span className="w-10 text-right font-bold">{row.pct==null?"—":Math.round(row.pct)+"%"}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-700 font-semibold leading-snug">
+                      {row.name || (row.descs && row.descs[0]) || "（大綱未載入／無描述）"}
+                    </div>
+                    {(row.syDesc || (row.descs && row.descs.length)) && (
+                      <div className="text-[10px] text-slate-500 leading-snug mt-0.5 line-clamp-2">
+                        {row.syDesc || row.descs.join("；")}
+                      </div>
+                    )}
+                    {/* hover 詳細面板 */}
+                    <div className="hidden group-hover:block absolute z-20 left-0 right-0 top-full mt-1 bg-white border border-pink-200 shadow-lg rounded-xl p-3 text-[11px] text-slate-700 max-h-48 overflow-auto">
+                      <div className="font-bold text-pink-800 mb-1">{row.topicId} {row.name}</div>
+                      {row.syDesc && <div className="mb-2 text-slate-600">{row.syDesc}</div>}
+                      <div className="font-semibold text-slate-500 mb-1">相關題目</div>
+                      <ul className="space-y-1">
+                        {(row.qTips || []).map(q => (
+                          <li key={q.id} className="border-t border-slate-100 pt-1">
+                            <span className="mono font-bold">{q.id}</span>
+                            <span className="text-slate-400 ml-1">{q.type}</span>
+                            {q.pct != null && <span className="ml-1 font-bold text-pink-700">{Math.round(q.pct)}%</span>}
+                            <div className="text-slate-600">{q.desc || "—"}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   </div>
-                  <span className="w-10 text-right font-bold">{t.pct==null?"—":Math.round(t.pct)+"%"}</span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
