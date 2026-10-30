@@ -4775,6 +4775,18 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             onChange={e => { setSelectedPaper(e.target.value); setSelectedStudentId(""); }}>
             {paperIds.map(id => <option key={id} value={id}>{id} — {pastpaperMaps[id].title || id}</option>)}
           </select>
+          {(() => {
+            const enteredN = activeStudents.filter(s => calcStudent(s.id)).length;
+            const totalN = activeStudents.length;
+            return (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-black px-2 py-1 rounded-lg bg-indigo-100 text-indigo-800 border border-indigo-200">
+                  已入分 {enteredN} / {totalN} 人
+                </span>
+                <span className="text-slate-400">其餘可於學生端自行入分</span>
+              </div>
+            );
+          })()}
           {loading && <div className="text-[11px] text-slate-400">載入成績中…</div>}
           {!!loadInfo && <div className="text-[11px] text-slate-500">{loadInfo}</div>}
           <div className="max-h-[58vh] overflow-auto space-y-1">
@@ -4795,8 +4807,8 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                   </div>
                   {st && (
                     <div className="mt-1 flex flex-wrap gap-1 text-[10px] font-bold">
-                      <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">MC {st.mcScore}/{st.mcMax}</span>
-                      <span className="px-1.5 py-0.5 rounded bg-fuchsia-50 text-fuchsia-700">LQ {st.lqScore}/{st.lqMax}</span>
+                      {st.mcMax > 0 && <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">MC {st.mcScore}/{st.mcMax}</span>}
+                      {st.lqMax > 0 && <span className="px-1.5 py-0.5 rounded bg-fuchsia-50 text-fuchsia-700">LQ {st.lqScore}/{st.lqMax}</span>}
                       <span className="px-1.5 py-0.5 rounded bg-slate-50 text-slate-600">{Math.round(st.pct*100)}%</span>
                     </div>
                   )}
@@ -4875,8 +4887,8 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
       </div>
 
       {/* Macro / Micro */}
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="bg-white rounded-2xl border p-4">
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-4">
           <h3 className="font-bold text-sky-700 mb-2">該卷涵蓋大領域表現 (Macro)</h3>
           {!macro.length ? <p className="text-slate-400 text-sm">尚無數據</p> : (
             <div className="space-y-2">
@@ -4892,9 +4904,9 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
             </div>
           )}
         </div>
-        <div className="bg-white rounded-2xl border p-4 max-h-80 overflow-auto">
-          <h3 className="font-bold text-pink-700 mb-1">各子課題表現剖析 (Micro)</h3>
-          <p className="text-[11px] text-slate-500 mb-2">滑鼠移到課題上可看相關題目詳情；下方為大綱／題目描述。</p>
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4 max-h-[32rem] overflow-auto">
+          <h3 className="font-bold text-pink-700 text-base mb-1">各子課題表現剖析 (Micro)</h3>
+          <p className="text-xs text-slate-500 mb-2">滑鼠移到課題上可看相關題目詳情；下方為大綱／題目描述。</p>
           {!micro.length ? <p className="text-slate-400 text-sm">尚無數據</p> : (
             <div className="space-y-3">
               {micro.slice(0, 30).map(row => {
@@ -4905,18 +4917,18 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
                 ].filter(Boolean).join("\n");
                 return (
                   <div key={row.topicId} className="group relative border border-slate-100 rounded-xl p-2 hover:border-pink-200 hover:bg-pink-50/40 transition" title={tip}>
-                    <div className="flex items-center gap-2 text-xs">
+                    <div className="flex items-center gap-2 text-sm">
                       <span className="mono font-black text-pink-800 shrink-0">{row.topicId}</span>
-                      <div className="flex-1 h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                      <div className="flex-1 h-3 rounded-full bg-slate-100 overflow-hidden">
                         <div className={`h-full ${row.pct!=null&&row.pct<40?"bg-rose-500":row.pct<60?"bg-amber-400":"bg-emerald-500"}`} style={{width: (row.pct||0)+"%"}} />
                       </div>
-                      <span className="w-10 text-right font-bold">{row.pct==null?"—":Math.round(row.pct)+"%"}</span>
+                      <span className="w-12 text-right font-bold">{row.pct==null?"—":Math.round(row.pct)+"%"}</span>
                     </div>
-                    <div className="mt-1 text-[11px] text-slate-700 font-semibold leading-snug">
+                    <div className="mt-1 text-sm text-slate-800 font-semibold leading-snug">
                       {row.name || (row.descs && row.descs[0]) || "（大綱未載入／無描述）"}
                     </div>
                     {(row.syDesc || (row.descs && row.descs.length)) && (
-                      <div className="text-[10px] text-slate-500 leading-snug mt-0.5 line-clamp-2">
+                      <div className="text-xs text-slate-500 leading-snug mt-0.5">
                         {row.syDesc || row.descs.join("；")}
                       </div>
                     )}
@@ -5024,6 +5036,7 @@ function PastpaperPersonalAnalysisView({ activeStudents, pastpaperMaps }) {
   const [aiLang, setAiLang] = useState("繁體中文");
   const [aiMcCount, setAiMcCount] = useState(8);
   const [aiLqCount, setAiLqCount] = useState(2);
+  const [aiExtra, setAiExtra] = useState({ practice: true, notes: false, ppt: false, explainImg: false });
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
 
@@ -5135,6 +5148,28 @@ function PastpaperPersonalAnalysisView({ activeStudents, pastpaperMaps }) {
     return { topics, domainStats };
   }, [selectedStudentId, selectedPapers, scores, pastpaperMaps]);
 
+  // 所選卷目綜合得分率 → 模擬等級
+  const gradeEstimate = useMemo(() => {
+    if (!selectedStudentId || !selectedPapers.length) return null;
+    let earned = 0, max = 0, papers = 0;
+    selectedPapers.forEach(paperId => {
+      const map = pastpaperMaps[paperId];
+      if (!map || !map.questions) return;
+      let paperAny = false;
+      map.questions.forEach(q => {
+        if (!hasAnsweredQ(paperId, q.id)) return;
+        paperAny = true;
+        max += q.max || 1;
+        earned += getStudentQScore(paperId, q);
+      });
+      if (paperAny) papers++;
+    });
+    if (max <= 0) return null;
+    const pct = earned / max;
+    const grade = estimateDseLevel(pct);
+    return { earned, max, pct, grade, papers };
+  }, [selectedStudentId, selectedPapers, scores, pastpaperMaps]);
+
   // Radar chart
   useEffect(() => {
     if (!selectedStudentId || !selectedPapers.length || !chartRef.current) return;
@@ -5208,8 +5243,12 @@ ${syllabus}
 1. 針對「具體錯因」設計針對性題目，釐清最常混淆觀念。
 2. MC 附 4 選項與【陷阱破解分析】；LQ 附【DSE 評分標準】與【解題思路】。
 3. 開頭給【${studentName}】一段簡短有力鼓勵。
-4. 每題標明 topicId。`;
-  }, [aiLang, aiMcCount, aiLqCount, selectedTopics, selectedStudentId, studentAnalysis, studentName]);
+4. 每題標明 topicId。
+${aiExtra.practice ? "" : "5. （可不生成練習題，改以下列產出為主）"}
+${aiExtra.notes ? "\n【另請產出】溫習筆記：條列重點、公式、常見陷阱。" : ""}
+${aiExtra.ppt ? "\n【另請產出】PPT 大綱 8–12 頁（每頁標題+要點）。" : ""}
+${aiExtra.explainImg ? "\n【另請產出】解說圖描述：可用於 AI 繪圖的場景說明（每弱項 1 段）。" : ""}`;
+  }, [aiLang, aiMcCount, aiLqCount, selectedTopics, selectedStudentId, studentAnalysis, studentName, aiExtra]);
 
   const togglePaper = (pid) => setSelectedPapers(prev => prev.includes(pid) ? prev.filter(p => p !== pid) : [...prev, pid]);
   const toggleAllPapers = () => {
@@ -5269,11 +5308,34 @@ ${syllabus}
             </div>
           </div>
 
+          {gradeEstimate && (
+            <div className="bg-white rounded-2xl border p-4">
+              <h3 className="font-bold text-purple-800 mb-2">等級預計（按已選卷目綜合）</h3>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className={`text-2xl font-black px-4 py-2 rounded-xl border-2 ${gradeEstimate.grade.color}`}>{gradeEstimate.grade.level}</span>
+                <div className="text-sm">
+                  <div className="font-bold">綜合得分 {gradeEstimate.earned}/{gradeEstimate.max}（{Math.round(gradeEstimate.pct*100)}%）</div>
+                  <div className="text-xs text-slate-500">涵蓋 {gradeEstimate.papers} 份已選試卷 · 門檻為校內模擬參考</div>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5 text-[11px] font-bold">
+                {[
+                  ["5**", "≥85%"], ["5*", "≥78%"], ["5", "≥67%"], ["4", "≥55%"],
+                  ["3", "≥40%"], ["2", "≥30%"], ["1", "≥20%"], ["U", "<20%"]
+                ].map(([lv, cut]) => (
+                  <span key={lv} className={`px-2 py-1 rounded border ${gradeEstimate.grade.level===lv?"bg-purple-100 border-purple-400 text-purple-900":"bg-slate-50 border-slate-200 text-slate-500"}`}>
+                    {lv} {cut}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="grid lg:grid-cols-5 gap-4">
             <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
               <div className="flex justify-between items-center mb-3">
-                <h3 className="font-bold text-rose-700">重災區課題（得分率 ≤ 60%）</h3>
-                <span className="text-xs text-slate-500">共 {studentAnalysis.topics.length} 個弱點</span>
+                <h3 className="font-bold text-rose-700 text-lg">重災區課題（得分率 ≤ 60%）</h3>
+                <span className="text-sm text-slate-500">共 {studentAnalysis.topics.length} 個弱點</span>
               </div>
               <div className="max-h-[28rem] overflow-auto space-y-2">
                 {studentAnalysis.topics.map(t => {
@@ -5286,10 +5348,10 @@ ${syllabus}
                           onChange={() => setSelectedTopics(prev => prev.includes(t.topicId) ? prev.filter(x => x !== t.topicId) : [...prev, t.topicId])} />
                         <div className="flex-1 min-w-0">
                           <div className="flex flex-wrap justify-between gap-2">
-                            <div className="font-bold text-sm"><span className="mono text-indigo-700">{t.topicId}</span> {t.topicName}</div>
+                            <div className="font-bold text-base"><span className="mono text-indigo-700">{t.topicId}</span> {t.topicName}</div>
                             <div className="text-right">
-                              <span className={`text-[10px] font-black px-1.5 py-0.5 rounded ${t.overallPct<=0.3?"bg-rose-100 text-rose-700":"bg-amber-100 text-amber-800"}`}>{sev}</span>
-                              <div className="text-sm font-black text-rose-600">{Math.round(t.overallPct*100)}%</div>
+                              <span className={`text-xs font-black px-2 py-0.5 rounded ${t.overallPct<=0.3?"bg-rose-100 text-rose-700":"bg-amber-100 text-amber-800"}`}>{sev}</span>
+                              <div className="text-lg font-black text-rose-600">{Math.round(t.overallPct*100)}%</div>
                             </div>
                           </div>
                           <div className="flex flex-wrap gap-1 mt-1">
@@ -5300,9 +5362,9 @@ ${syllabus}
                             ))}
                           </div>
                           {(t.errorDescArray || []).length > 0 && (
-                            <div className="text-[11px] text-slate-600 mt-1">具體錯因：{t.errorDescArray.join("；")}</div>
+                            <div className="text-sm text-slate-700 mt-1">具體錯因：{t.errorDescArray.join("；")}</div>
                           )}
-                          {t.syllabusDesc && <div className="text-[10px] text-slate-400 mt-0.5 line-clamp-2">{t.syllabusDesc}</div>}
+                          {t.syllabusDesc && <div className="text-xs text-slate-500 mt-0.5">{t.syllabusDesc}</div>}
                         </div>
                       </div>
                     </label>
@@ -5331,6 +5393,13 @@ ${syllabus}
                     <input type="number" className="mt-0.5 w-full border rounded px-1 py-1.5" value={aiLqCount} onChange={e=>setAiLqCount(parseInt(e.target.value)||0)} />
                   </label>
                 </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {[["practice","練習卷"],["notes","筆記"],["ppt","PPT"],["explainImg","解說圖"]].map(([k,lab])=>(
+                  <label key={k} className={`text-xs font-bold px-2.5 py-1.5 rounded-lg border-2 cursor-pointer ${aiExtra[k]?"border-indigo-500 bg-indigo-50 text-indigo-800":"border-slate-200 text-slate-500"}`}>
+                    <input type="checkbox" className="mr-1" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} />{lab}
+                  </label>
+                ))}
               </div>
               <div className="rounded-xl border bg-slate-50 p-3 max-h-64 overflow-auto">
                 <div className="text-xs font-bold text-slate-500 mb-1">AI Prompt 預覽</div>
