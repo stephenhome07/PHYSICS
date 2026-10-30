@@ -671,6 +671,7 @@ function Sidebar({ view, setView, cohort, setCohort, cohorts, reload, loading })
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">資料</div>
         <Item id="students" label="學生名單管理" />
+        <Item id="promotion" label="新學年智慧升班" />
         <Item id="syllabus" label="課程大綱設定" />
         <Item id="caExport" label="平時分輸出" />
         <Item id="import" label="匯入 Sheet / 概況" />
@@ -6743,6 +6744,35 @@ function SyllabusSettingsView({ students }) {
         </p>
       </div>
 
+      <div className="bg-violet-50 border border-violet-200 rounded-2xl p-4 space-y-3">
+        <div className="font-bold text-violet-900">AI Prompt · 由教學文件生成大綱表</div>
+        <p className="text-xs text-violet-800">把官方／校本教學大綱、課程文件上傳到 Gemini／ChatGPT，貼上下列 Prompt，要求輸出 Tab 分隔表，再貼回下方編輯區儲存。</p>
+        <button className="bg-violet-600 text-white font-bold text-sm px-4 py-2 rounded-lg"
+          onClick={() => {
+            const prompt = `【身份】你是香港中學物理課程設計專家，熟悉 HKDSE Physics 及初中科學（物理部份）課程架構。
+
+【任務】我會提供一份或多份「教學文件／課程大綱／Textbook 目錄／EDB 課程文件」。請你整理成系統可用的【課程大綱表】。
+
+【輸出格式】（必須嚴格遵守）
+1. 只輸出純文字表格，用 Tab 分隔，不要 Markdown、不要 code fence、不要額外說明。
+2. 第一行必須是表頭：
+課題編號\t範疇\t課題名稱\t學習要求
+3. 之後每一行一個課題，例如：
+2.3.3\t力學\t牛頓第二定律\t應用 F=ma 分析物體的加速度與受力關係
+4. 課題編號：優先使用官方／校本已有編號（如 1.1.1、2.3.3、E3.2.1）。若文件無編號，請按章節合理編出層級編號，並保持一致。
+5. 範疇：熱學／力學／波動學／電磁學／放射學／能量與能源使用／原子世界／醫學物理／其他（可按文件調整）。
+6. 課題名稱：精簡（約 4–12 字）。
+7. 學習要求：一句至兩句，寫「學生應能……」的可考點描述，方便出題與弱點分析。
+8. 涵蓋文件中的所有主要課題；不要省略選修（如 E3、E4），若文件有提及。
+9. 語言：繁體中文。
+
+【開始】請等待我上傳／貼上教學文件後再輸出表格。`;
+            navigator.clipboard.writeText(prompt).then(() => alert("已複製 AI Prompt")).catch(() => alert("複製失敗，請手動選取"));
+          }}>
+          複製生成大綱 Prompt
+        </button>
+      </div>
+
       <div className="grid lg:grid-cols-5 gap-4">
         <div className="lg:col-span-2 space-y-3">
           <div className="bg-white rounded-2xl border p-4 space-y-2">
@@ -6802,6 +6832,255 @@ function SyllabusSettingsView({ students }) {
             value={text} onChange={e=>setText(e.target.value)}
             placeholder={"課題編號\t範疇\t課題名稱\t學習要求\n2.3.3\t力學\t牛頓第二定律\t..."} />
           {status && <div className="text-sm font-semibold text-emerald-700">{status}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+function StudentPromotionView({ students, onReload }) {
+  const cohorts = useMemo(() => Array.from(new Set((students || []).map(s => s.cohort).filter(Boolean))).sort(), [students]);
+  const [selectedCohort, setSelectedCohort] = useState(cohorts[0] || "");
+  const [newCohort, setNewCohort] = useState(selectedCohort);
+  const [pasteData, setPasteData] = useState("");
+  const [previewList, setPreviewList] = useState(null);
+  const [filterCohort, setFilterCohort] = useState("全部");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setNewCohort(selectedCohort); }, [selectedCohort]);
+  useEffect(() => {
+    if (cohorts.length && !cohorts.includes(selectedCohort)) setSelectedCohort(cohorts[0] || "");
+  }, [cohorts]);
+
+  const filteredRoster = useMemo(() => {
+    return (students || []).filter(s => filterCohort === "全部" || s.cohort === filterCohort)
+      .sort((a, b) => String(a.cohort||"").localeCompare(String(b.cohort||"")) || String(a.class||"").localeCompare(String(b.class||"")) || (Number(a.num)||0)-(Number(b.num)||0));
+  }, [students, filterCohort]);
+
+  const handlePreview = () => {
+    if (!pasteData.trim()) return alert("請先貼上新學期 Excel 學生資料");
+    const lines = pasteData.trim().split("\n");
+    const incoming = [];
+    lines.forEach(line => {
+      const parts = line.split("\t");
+      if (parts.length >= 3) {
+        incoming.push({
+          cls: parts[0].trim(),
+          num: parts[1].trim(),
+          name: parts[2].trim(),
+          studentId: parts.length >= 4 ? parts[3].trim() : ""
+        });
+      }
+    });
+    if (!incoming.length) return alert("無法解析。格式：班別[Tab]座號[Tab]姓名 或 再加[Tab]學號");
+
+    const currentStudents = (students || []).filter(s => s.cohort === selectedCohort);
+    const preview = incoming.map(inc => {
+      let match = null;
+      if (inc.studentId) {
+        match = currentStudents.find(s => s.id === inc.studentId || s.sid === inc.studentId);
+      }
+      if (!match) match = currentStudents.find(s => s.name === inc.name);
+      return {
+        ...inc,
+        exists: !!match,
+        oldId: match?.id,
+        oldSid: match?.sid || match?.id,
+        oldClass: match?.class,
+        oldNum: match?.num
+      };
+    });
+    const notFound = currentStudents.filter(s => {
+      const bySid = incoming.some(i => i.studentId && (s.id === i.studentId || s.sid === i.studentId));
+      const byName = incoming.some(i => i.name === s.name);
+      return !bySid && !byName;
+    });
+    setPreviewList({ preview, notFound });
+  };
+
+  const handleCommit = async () => {
+    if (!previewList?.preview?.length) return alert("請先預覽");
+    if (!confirm(`確認將來源群組「${selectedCohort}」更新為目標「${newCohort}」？\n舊生會更新班號姓名群組（保留永久 ID）；名單上的新生會新增。`)) return;
+    setBusy(true);
+    let promoteCount = 0, newCount = 0;
+    try {
+      for (const item of previewList.preview) {
+        if (item.exists && item.oldId) {
+          const permanentId = item.oldId; // Firebase：成績掛在永久 id 下，不改 id
+          const patch = {
+            class: item.cls,
+            num: isNaN(Number(item.num)) ? item.num : Number(item.num),
+            name: item.name,
+            cohort: newCohort,
+            sid: item.studentId || item.oldSid || permanentId,
+            updatedAt: new Date().toISOString()
+          };
+          await db.collection("students").doc(permanentId).set(patch, { merge: true });
+          // 若貼上了新的 s 學號且與舊 id 不同，才遷移主鍵
+          if (item.studentId && item.studentId !== permanentId && String(item.studentId).startsWith("s")) {
+            await migrateStudentId(permanentId, item.studentId, patch);
+          }
+          promoteCount++;
+        } else {
+          let nid = item.studentId || (`${item.cls}-${item.num}`.replace(/\s+/g, ""));
+          const exists = students.find(s => s.id === nid);
+          if (exists) nid = nid + "_" + Date.now().toString(36).slice(-4);
+          await db.collection("students").doc(nid).set({
+            id: nid,
+            sid: item.studentId || nid,
+            class: item.cls,
+            num: isNaN(Number(item.num)) ? item.num : Number(item.num),
+            name: item.name,
+            cohort: newCohort,
+            pin: "",
+            active: true,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+          newCount++;
+        }
+      }
+      alert(`完成！\n更新舊生：${promoteCount}\n新增學生：${newCount}\n（成績掛在永久學生 ID 下，班別變更無需搬成績）`);
+      setPreviewList(null);
+      setPasteData("");
+      if (onReload) await onReload();
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const clearScores = async (sid, name) => {
+    if (!confirm(`清除「${name}」全部成績（小測/考試/功課/Pastpaper）？學生仍留在名單。`)) return;
+    setBusy(true);
+    try {
+      for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
+        const snap = await db.collection("scores").doc(sid).collection(sub).get();
+        for (const d of snap.docs) await d.ref.delete();
+      }
+      alert("已清除成績");
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const purgeOrphans = async () => {
+    if (!confirm("掃描 scores 集合，刪除「不在學生名單」的成績根文件？（可能需一點時間）")) return;
+    setBusy(true);
+    try {
+      const valid = new Set((students || []).map(s => s.id));
+      const roots = await db.collection("scores").get();
+      let n = 0;
+      for (const root of roots.docs) {
+        if (valid.has(root.id)) continue;
+        for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
+          const snap = await root.ref.collection(sub).get();
+          for (const d of snap.docs) await d.ref.delete();
+        }
+        await root.ref.delete();
+        n++;
+      }
+      alert(n ? `已清理 ${n} 個幽靈成績根` : "沒有發現幽靈成績");
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="font-bold text-xl text-purple-800">學生動態管理與智慧升班（新學年轉換）</h2>
+        <p className="text-sm text-slate-500 mt-1">
+          貼上新學期名單預覽。優先用「學號／永久 ID」對應舊生，否則用姓名。
+          Firebase 成績存在永久學生 ID 下，升班只更新班別／座號／群組，一般<strong>不必搬成績</strong>。
+        </p>
+      </div>
+
+      <div className="bg-white rounded-2xl border p-4 space-y-4">
+        <div className="grid md:grid-cols-2 gap-4">
+          <label className="text-xs font-bold">1. 來源群組（舊名單所在）
+            <select className="mt-1 w-full border rounded-lg px-2 py-2 text-sm font-semibold" value={selectedCohort} onChange={e=>setSelectedCohort(e.target.value)}>
+              {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <label className="text-xs font-bold">2. 目標群組（可改／留班）
+            <input className="mt-1 w-full border-2 border-purple-200 rounded-lg px-2 py-2 text-sm font-bold" value={newCohort} onChange={e=>setNewCohort(e.target.value)} />
+          </label>
+        </div>
+        <div>
+          <div className="text-xs font-bold mb-1">3. 貼上新學期名單（Excel 複製）</div>
+          <p className="text-[11px] text-slate-500 mb-1">格式：班別[Tab]座號[Tab]姓名　或　班別[Tab]座號[Tab]姓名[Tab]學號(s12345678)</p>
+          <textarea className="w-full h-36 border rounded-xl p-3 text-sm mono" value={pasteData} onChange={e=>setPasteData(e.target.value)}
+            placeholder={"6A\t23\t謝宇邦\ts20241234\n6B\t13\t林宥燁\ts20241235"} />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button className="bg-purple-600 text-white font-bold px-4 py-2 rounded-xl text-sm" onClick={handlePreview}>預覽升班結果</button>
+          <button disabled={busy || !previewList} className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-sm disabled:opacity-40" onClick={handleCommit}>
+            {busy ? "處理中…" : "確認寫入雲端"}
+          </button>
+          <button disabled={busy} className="bg-rose-600 text-white font-bold px-4 py-2 rounded-xl text-sm disabled:opacity-40" onClick={purgeOrphans}>
+            清理幽靈成績
+          </button>
+        </div>
+      </div>
+
+      {previewList && (
+        <div className="bg-white rounded-2xl border p-4 space-y-3">
+          <h3 className="font-bold">升班／更新清單預覽</h3>
+          <div className="overflow-auto max-h-64">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 sticky top-0">
+                <tr>{["狀態","新班","座號","姓名","學號","舊 ID","舊班座"].map(h=><th key={h} className="text-left px-2 py-1 text-xs text-slate-500">{h}</th>)}</tr>
+              </thead>
+              <tbody>
+                {previewList.preview.map((r, i) => (
+                  <tr key={i} className="border-t">
+                    <td className="px-2 py-1">{r.exists ? <span className="text-emerald-600 font-bold">更新</span> : <span className="text-amber-600 font-bold">新增</span>}</td>
+                    <td className="px-2 py-1">{r.cls}</td>
+                    <td className="px-2 py-1">{r.num}</td>
+                    <td className="px-2 py-1 font-semibold">{r.name}</td>
+                    <td className="px-2 py-1 mono text-xs">{r.studentId || "—"}</td>
+                    <td className="px-2 py-1 mono text-xs">{r.oldId || "—"}</td>
+                    <td className="px-2 py-1 text-xs text-slate-500">{r.exists ? `${r.oldClass}-${r.oldNum}` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!!previewList.notFound.length && (
+            <div className="text-sm text-rose-700">
+              <b>來源群組有 {previewList.notFound.length} 人未出現在新名單</b>（不會自動刪除；可在下方名冊處理）：
+              {previewList.notFound.map(s => s.name).join("、")}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border p-4">
+        <div className="flex flex-wrap justify-between gap-2 mb-3">
+          <h3 className="font-bold">物理科現有學生名冊（{filteredRoster.length} 人）</h3>
+          <select className="border rounded-lg px-2 py-1 text-sm" value={filterCohort} onChange={e=>setFilterCohort(e.target.value)}>
+            <option value="全部">顯示全部學群</option>
+            {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div className="overflow-auto max-h-80">
+          <table className="min-w-full text-sm">
+            <thead className="sticky top-0 bg-slate-50">
+              <tr>{["學群","班","座號","姓名","永久 ID","操作"].map(h=><th key={h} className="text-left px-2 py-1 text-xs text-slate-500">{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              {filteredRoster.map(s => (
+                <tr key={s.id} className="border-t">
+                  <td className="px-2 py-1.5 text-xs">{s.cohort || "—"}</td>
+                  <td className="px-2 py-1.5">{s.class}</td>
+                  <td className="px-2 py-1.5">{s.num}</td>
+                  <td className="px-2 py-1.5 font-bold">{s.name}</td>
+                  <td className="px-2 py-1.5 mono text-xs">{s.id}</td>
+                  <td className="px-2 py-1.5">
+                    <button className="text-amber-600 font-bold text-xs mr-2" disabled={busy} onClick={()=>clearScores(s.id, s.name)}>清成績</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -6889,6 +7168,7 @@ function App() {
         {loading && <div className="text-xs text-slate-400 mb-2">載入中…</div>}
         {view==="ranking" && <ClassRankingView activeStudents={activeStudents} currentCohort={cohort} homeworkMaps={homeworkMaps} quizMaps={quizMaps} examMaps={examMaps} pastpaperMaps={pastpaperMaps} />}
         {view==="students" && <StudentsManageView students={students} onReload={reload} />}
+        {view==="promotion" && <StudentPromotionView students={students} onReload={reload} />}
         {view==="syllabus" && <SyllabusSettingsView students={students} />}
         {view==="caExport" && <ContinuousAssessView students={students} homeworkMaps={homeworkMaps} examMaps={examMaps} currentCohort={cohort} />}
         {view==="import" && <ImportView onReload={reload} />}
