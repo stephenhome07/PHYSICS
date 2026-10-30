@@ -527,12 +527,6 @@ function Sidebar({ view, setView }) {
         <div className="text-[11px] text-slate-400">Firebase · hoyuphysics</div>
       </div>
       <div>
-        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">資料</div>
-        <Item id="import" label="匯入 Sheet / 概況" />
-        <Item id="idMap" label="學生 ID 對照補齊" />
-        <Item id="pins" label="學生與 PIN" />
-      </div>
-      <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">排行</div>
         <Item id="ranking" label="群組戰力排行榜" />
       </div>
@@ -561,6 +555,13 @@ function Sidebar({ view, setView }) {
         <Item id="ppInput" label="歷屆試題輸入及分析" />
         <Item id="ppPersonal" label="個人 Pastpaper 分析" />
         <Item id="ppSettings" label="Pastpaper 題庫設定" />
+      </div>
+      <div>
+        <div className="text-[10px] font-black text-slate-400 uppercase mb-1">資料</div>
+        <Item id="students" label="學生名單管理" />
+        <Item id="import" label="匯入 Sheet / 概況" />
+        <Item id="idMap" label="學生 ID 對照補齊" />
+        <Item id="pins" label="學生與 PIN" />
       </div>
     </aside>
   );
@@ -5833,9 +5834,9 @@ function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMap
               <div key={row.student.id} className={`p-4 flex items-center gap-4 ${idx < 3 ? "bg-amber-50/50" : "hover:bg-slate-50"}`}>
                 <div className={`w-10 text-center text-xl font-black ${idx < 3 ? "text-amber-500" : "text-slate-400"}`}>{medal(idx)}</div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-bold text-slate-800">
+                  <div className="font-black text-lg text-slate-800">
                     {row.student.name}
-                    <span className="ml-2 text-xs font-semibold text-slate-400">{row.student.class}-{row.student.num}</span>
+                    <span className="ml-2 text-sm font-semibold text-slate-400">{row.student.class}-{row.student.num}</span>
                   </div>
                   {isComp && row.detail && (
                     <div className="text-xs text-slate-500 mt-0.5">
@@ -5857,6 +5858,197 @@ function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMap
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+
+function StudentsManageView({ students, onReload }) {
+  const [filterCohort, setFilterCohort] = useState("全部");
+  const [filterClass, setFilterClass] = useState("全部");
+  const [q, setQ] = useState("");
+  const [editId, setEditId] = useState("");
+  const [form, setForm] = useState({ class: "", num: "", name: "", cohort: "", id: "" });
+  const [busy, setBusy] = useState(false);
+  const [showInactive, setShowInactive] = useState(false);
+
+  const cohorts = useMemo(() => Array.from(new Set(students.map(s => s.cohort).filter(Boolean))).sort(), [students]);
+  const classes = useMemo(() => Array.from(new Set(students.map(s => s.class).filter(Boolean))).sort(), [students]);
+
+  const filtered = useMemo(() => {
+    return students.filter(s => {
+      if (!showInactive && s.active === false) return false;
+      if (filterCohort !== "全部" && s.cohort !== filterCohort) return false;
+      if (filterClass !== "全部" && s.class !== filterClass) return false;
+      if (q) {
+        const hay = `${s.id} ${s.class} ${s.num} ${s.name} ${s.cohort}`.toLowerCase();
+        if (!hay.includes(q.toLowerCase())) return false;
+      }
+      return true;
+    });
+  }, [students, filterCohort, filterClass, q, showInactive]);
+
+  const startEdit = (s) => {
+    setEditId(s.id);
+    setForm({ class: s.class || "", num: s.num ?? "", name: s.name || "", cohort: s.cohort || "", id: s.id });
+  };
+
+  const startAdd = () => {
+    setEditId("__new__");
+    setForm({ class: "", num: "", name: "", cohort: filterCohort !== "全部" ? filterCohort : (cohorts[0] || ""), id: "" });
+  };
+
+  const save = async () => {
+    if (!form.name.trim()) return alert("請填姓名");
+    if (!form.class.trim()) return alert("請填班別");
+    setBusy(true);
+    try {
+      if (editId === "__new__") {
+        let sid = (form.id || "").trim();
+        if (!sid) {
+          // 暫用 class-num 作 id，建議之後用 ID 對照補齊
+          sid = `${form.class}-${form.num}`.replace(/\s+/g, "");
+        }
+        if (!sid.startsWith("s") && !sid.includes("-")) {
+          // allow s12345678 or class-num
+        }
+        const exists = students.find(x => x.id === sid);
+        if (exists) return alert("此 ID 已存在：" + sid);
+        await db.collection("students").doc(sid).set({
+          id: sid, sid, class: form.class.trim(), num: isNaN(Number(form.num)) ? form.num : Number(form.num),
+          name: form.name.trim(), cohort: form.cohort.trim(), pin: "", active: true,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+        alert("已新增學生 " + sid);
+      } else {
+        const patch = {
+          class: form.class.trim(),
+          num: isNaN(Number(form.num)) ? form.num : Number(form.num),
+          name: form.name.trim(),
+          cohort: form.cohort.trim(),
+          updatedAt: new Date().toISOString()
+        };
+        await db.collection("students").doc(editId).set(patch, { merge: true });
+        // 若改了主鍵 ID
+        const newId = (form.id || "").trim();
+        if (newId && newId !== editId) {
+          if (!confirm(`將主鍵由 ${editId} 改為 ${newId}？會遷移成績子集合。`)) {
+            if (onReload) await onReload();
+            setBusy(false);
+            return;
+          }
+          await migrateStudentId(editId, newId, patch);
+        }
+        alert("已儲存");
+      }
+      setEditId("");
+      if (onReload) await onReload();
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const setActive = async (sid, active) => {
+    if (!confirm(active ? "重新啟用此學生？" : "停用此學生？（不會刪成績）")) return;
+    setBusy(true);
+    try {
+      await db.collection("students").doc(sid).set({ active, updatedAt: new Date().toISOString() }, { merge: true });
+      if (onReload) await onReload();
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap justify-between gap-3 items-center">
+        <div>
+          <h2 className="font-bold text-xl">學生名單管理</h2>
+          <p className="text-sm text-slate-500">共 {students.length} 人 · 篩選後 {filtered.length} 人。新增後建議用「學生 ID 對照補齊」改成 s12345678。</p>
+        </div>
+        <button className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-sm" onClick={startAdd}>＋ 新增學生</button>
+      </div>
+
+      <div className="bg-white rounded-2xl border p-4 flex flex-wrap gap-3 items-end">
+        <label className="text-xs font-bold">群組
+          <select className="mt-1 block border rounded-lg px-2 py-1.5 text-sm" value={filterCohort} onChange={e=>setFilterCohort(e.target.value)}>
+            <option value="全部">全部</option>
+            {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-bold">班別
+          <select className="mt-1 block border rounded-lg px-2 py-1.5 text-sm" value={filterClass} onChange={e=>setFilterClass(e.target.value)}>
+            <option value="全部">全部</option>
+            {classes.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-bold flex-1 min-w-[160px]">搜尋
+          <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" placeholder="姓名 / ID / 班號" value={q} onChange={e=>setQ(e.target.value)} />
+        </label>
+        <label className="text-xs font-bold flex items-center gap-1 pb-2">
+          <input type="checkbox" checked={showInactive} onChange={e=>setShowInactive(e.target.checked)} /> 顯示已停用
+        </label>
+      </div>
+
+      {editId && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 space-y-3">
+          <h3 className="font-bold text-indigo-900">{editId === "__new__" ? "新增學生" : `編輯 ${editId}`}</h3>
+          <div className="grid sm:grid-cols-5 gap-2">
+            <label className="text-xs font-bold">主鍵 ID
+              <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm mono" value={form.id} onChange={e=>setForm(f=>({...f,id:e.target.value}))}
+                placeholder={editId==="__new__"?"可留空暫用班-號":"s12345678"} />
+            </label>
+            <label className="text-xs font-bold">班別
+              <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={form.class} onChange={e=>setForm(f=>({...f,class:e.target.value}))} />
+            </label>
+            <label className="text-xs font-bold">學號
+              <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={form.num} onChange={e=>setForm(f=>({...f,num:e.target.value}))} />
+            </label>
+            <label className="text-xs font-bold">姓名
+              <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} />
+            </label>
+            <label className="text-xs font-bold">群組
+              <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" list="cohort-list" value={form.cohort} onChange={e=>setForm(f=>({...f,cohort:e.target.value}))} />
+              <datalist id="cohort-list">{cohorts.map(c=><option key={c} value={c} />)}</datalist>
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <button disabled={busy} className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-lg text-sm disabled:opacity-50" onClick={save}>{busy?"儲存中…":"儲存"}</button>
+            <button className="border font-bold px-4 py-2 rounded-lg text-sm" onClick={()=>setEditId("")}>取消</button>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border overflow-auto max-h-[70vh]">
+        <table className="min-w-full text-sm">
+          <thead className="sticky top-0 bg-slate-50">
+            <tr>
+              {["主鍵 ID","班","號","姓名","群組","狀態","操作"].map(h => (
+                <th key={h} className="text-left px-3 py-2 text-xs text-slate-500 font-bold">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(s => (
+              <tr key={s.id} className={`border-t ${s.active===false?"opacity-50":""}`}>
+                <td className="px-3 py-2 mono text-xs font-bold">{s.id}</td>
+                <td className="px-3 py-2">{s.class}</td>
+                <td className="px-3 py-2">{s.num}</td>
+                <td className="px-3 py-2 font-bold text-base">{s.name}</td>
+                <td className="px-3 py-2 text-xs">{s.cohort || "—"}</td>
+                <td className="px-3 py-2 text-xs">{s.active===false ? "停用" : "使用中"}</td>
+                <td className="px-3 py-2 space-x-2 whitespace-nowrap">
+                  <button className="text-indigo-600 font-bold text-xs" onClick={()=>startEdit(s)}>編輯</button>
+                  {s.active===false
+                    ? <button className="text-emerald-600 font-bold text-xs" onClick={()=>setActive(s.id,true)}>啟用</button>
+                    : <button className="text-amber-600 font-bold text-xs" onClick={()=>setActive(s.id,false)}>停用</button>}
+                </td>
+              </tr>
+            ))}
+            {!filtered.length && (
+              <tr><td colSpan={7} className="p-8 text-center text-slate-400">沒有符合條件的學生</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -5916,6 +6108,7 @@ function App() {
           {loading && <span className="text-xs text-slate-400">載入中…</span>}
         </div>
         {view==="ranking" && <ClassRankingView activeStudents={activeStudents} currentCohort={cohort} homeworkMaps={homeworkMaps} quizMaps={quizMaps} examMaps={examMaps} pastpaperMaps={pastpaperMaps} />}
+        {view==="students" && <StudentsManageView students={students} onReload={reload} />}
         {view==="import" && <ImportView onReload={reload} />}
         {view==="idMap" && <IdMapView students={students} onReload={reload} />}
         {view==="pins" && <PinsView students={students} onReload={reload} />}
