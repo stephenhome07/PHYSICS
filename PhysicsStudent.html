@@ -1245,6 +1245,15 @@ function SchoolProgressView({ student, maps, scores, makeup, onGoAi }) {
 
 
 
+function shortPastpaperQLabel(qid, type) {
+  const s = String(qid || "");
+  // 2025-MC-01 / 2025-MC-E3-01 → Q.1 ; 2025-LQ-01a → Q.1a
+  let m = s.match(/(?:MC|LQ)[-_]?(?:E\d[-_]?)?0*(\d+[a-z]*)$/i);
+  if (m) return "Q." + m[1];
+  m = s.match(/0*(\d+[a-z]*)$/i);
+  if (m) return "Q." + m[1];
+  return s;
+}
 function parsePastpaperMeta(paperId, map) {
   const id = String(paperId || "");
   const title = (map && map.title) || id;
@@ -1425,6 +1434,12 @@ function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
     setDraft(d);
     setEditPaperId(paperId);
     setSaveStatus("");
+    setTimeout(() => {
+      const panel = document.getElementById("pp-edit-panel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      const first = panel && panel.querySelector("[data-pp-qid]");
+      if (first) first.focus();
+    }, 80);
   };
 
   const scheduleSave = (paperId, nextDraft) => {
@@ -1449,21 +1464,27 @@ function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
     }, 600);
   };
 
+  const jumpToNextQ = (qid) => {
+    const map = editPaperId ? ppMaps[editPaperId] : null;
+    const qs = map?.questions || [];
+    const idx = qs.findIndex(q => q.id === qid);
+    if (idx < 0 || idx >= qs.length - 1) return;
+    const nextId = qs[idx + 1].id;
+    setTimeout(() => {
+      const el = document.querySelector(`[data-pp-qid="${CSS.escape(nextId)}"]`);
+      if (el) {
+        el.focus();
+        if (typeof el.select === "function") el.select();
+        el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }, 40);
+  };
+
   const setAns = (qid, val, opts = {}) => {
     const next = { ...draft, [qid]: val };
     setDraft(next);
     scheduleSave(editPaperId, next);
-    if (opts.jumpNext && editMap?.questions) {
-      const qs = editMap.questions;
-      const idx = qs.findIndex(q => q.id === qid);
-      if (idx >= 0 && idx < qs.length - 1) {
-        const nextId = qs[idx + 1].id;
-        setTimeout(() => {
-          const el = document.querySelector(`[data-pp-qid="${nextId}"]`);
-          if (el) { el.focus(); el.select && el.select(); }
-        }, 30);
-      }
-    }
+    if (opts.jumpNext) jumpToNextQ(qid);
   };
 
   const editMap = editPaperId ? ppMaps[editPaperId] : null;
@@ -1490,7 +1511,7 @@ function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
 
       {/* 輸入面板 */}
       {editPaperId && editMap && (
-        <div className="bg-white rounded-3xl border-2 border-indigo-200 shadow-lg p-5 space-y-4">
+        <div id="pp-edit-panel" className="bg-white rounded-3xl border-2 border-indigo-200 shadow-lg p-5 space-y-4 scroll-mt-4">
           <div className="flex flex-wrap justify-between gap-3 items-start">
             <div>
               <div className="text-lg font-black text-indigo-900">{editMap.title || editPaperId}</div>
@@ -1501,35 +1522,41 @@ function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
               <button type="button" className="text-base font-bold text-slate-600 border px-3 py-1.5 rounded-xl" onClick={() => setEditPaperId("")}>關閉</button>
             </div>
           </div>
-          <p className="text-sm text-slate-500">輸入後約 0.6 秒自動儲存。MC 填一字母會跳下一題；長題按 Enter 跳下一題。</p>
+          <p className="text-sm text-slate-500">自動儲存。MC 填字母即跳下一題；長題填完按 Enter 或離開格會跳下一題。</p>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[55vh] overflow-auto">
             {(editMap.questions || []).map(q => {
               const raw = draft[q.id] ?? "";
               const has = String(raw).trim() !== "";
+              const isMc = q.type === "MC";
               let color = "border-slate-200 bg-white";
-              if (has && q.type === "MC") {
+              if (has && isMc) {
                 const ok = q.ans && q.ans.toString().split(",").map(a => a.trim().toUpperCase()).includes(String(raw).trim().toUpperCase());
                 color = ok ? "border-emerald-400 bg-emerald-50" : "border-rose-400 bg-rose-50";
-              } else if (has && q.type !== "MC") {
+              } else if (has && !isMc) {
                 const n = parseFloat(raw);
                 if (!isNaN(n) && n <= 0) color = "border-rose-300 bg-rose-50";
                 else if (!isNaN(n) && n >= (q.max || 0)) color = "border-emerald-400 bg-emerald-50";
                 else color = "border-amber-300 bg-amber-50";
               }
+              const ansShow = isMc && q.ans ? String(q.ans).toUpperCase() : null;
               return (
                 <div key={q.id} className={`rounded-xl border-2 p-3 ${color}`}>
-                  <div className="flex justify-between gap-2 text-sm font-bold">
-                    <span className="mono text-indigo-700">{q.id}</span>
-                    <span className="text-slate-500">{q.type === "MC" ? `MC /${q.max || 1}${q.ans ? " · 參考" : ""}` : `LQ /${q.max || 1}`}</span>
+                  <div className="flex justify-between gap-2 items-start">
+                    <span className="text-base font-black text-indigo-800">{shortPastpaperQLabel(q.id, q.type)}</span>
+                    <span className="text-xl font-black text-slate-700 tabular-nums">/{q.max || 1}</span>
                   </div>
-                  {q.topicId && <div className="text-xs text-slate-500 mt-0.5">{q.topicId} {q.topicDesc || ""}</div>}
+                  {ansShow && (
+                    <div className="mt-1 text-sm font-black text-emerald-700">正解 {ansShow}</div>
+                  )}
+                  {q.topicDesc && <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{q.topicDesc}</div>}
                   <input
                     data-pp-qid={q.id}
-                    className="mt-2 w-full border-2 rounded-lg px-3 py-2 text-lg font-black text-center uppercase"
+                    className="mt-2 w-full border-2 rounded-lg px-3 py-2.5 text-xl font-black text-center uppercase"
                     value={raw}
-                    placeholder={q.type === "MC" ? "A-D" : "分數"}
+                    placeholder={isMc ? "A-D" : "0"}
+                    inputMode={isMc ? "text" : "decimal"}
                     onChange={e => {
-                      if (q.type === "MC") {
+                      if (isMc) {
                         const v = e.target.value.toUpperCase().replace(/[^A-D]/g, "").slice(0, 1);
                         setAns(q.id, v, { jumpNext: v.length === 1 });
                       } else {
@@ -1539,7 +1566,13 @@ function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
                     onKeyDown={e => {
                       if (e.key === "Enter") {
                         e.preventDefault();
-                        setAns(q.id, draft[q.id] ?? raw, { jumpNext: true });
+                        const v = e.target.value;
+                        setAns(q.id, v, { jumpNext: true });
+                      }
+                    }}
+                    onBlur={e => {
+                      if (!isMc && String(e.target.value).trim() !== "") {
+                        jumpToNextQ(q.id);
                       }
                     }}
                   />
