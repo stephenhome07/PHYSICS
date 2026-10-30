@@ -16,7 +16,7 @@
   .mono{font-family:ui-monospace,Menlo,monospace}
 </style>
 </head>
-<body class="bg-slate-100 text-slate-800">
+<body class="bg-[#f1f5f9] text-slate-800">
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
 /** @jsxRuntime classic */
@@ -36,6 +36,7 @@ if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
 const SS_SID = "physics_student_id";
+const LS_LAST_SID = "physics_student_last_sid";
 const SS_ADMIN = "physics_student_admin";
 
 // ---------- helpers ----------
@@ -126,6 +127,19 @@ function mapVisible(map, cohort) {
   if (!map.cohort || map.cohort === "" || map.cohort === "所有學生") return true;
   if (!cohort) return true;
   return map.cohort === cohort;
+}
+/** 學生端功課：只顯示「本群組」或「該生已有成績紀錄」的功課，避免其他年份洗版 */
+function homeworkVisibleForStudent(map, hid, cohort, hwScores) {
+  if (!map) return false;
+  const hasScore = !!(hwScores && hwScores[hid] && (
+    (hwScores[hid].scores && Object.keys(hwScores[hid].scores).length) ||
+    hwScores[hid].remakeStatus
+  ));
+  if (map.cohort && map.cohort !== "" && map.cohort !== "所有學生") {
+    return map.cohort === cohort;
+  }
+  // 無指定群組：學生端預設不顯示，除非本人已有此份紀錄
+  return hasScore;
 }
 function scoreOfRec(map, rec) {
   if (!map?.questions?.length || !rec) return null;
@@ -252,7 +266,9 @@ function LoginView({ onLogin }) {
       try {
         const list = await loadAllStudents();
         setStudents(list);
-        const saved = sessionStorage.getItem(SS_SID);
+        let saved = "";
+        try { saved = localStorage.getItem(LS_LAST_SID) || ""; } catch (e) {}
+        if (!saved) saved = sessionStorage.getItem(SS_SID) || "";
         if (saved && list.some(s => s.id === saved)) setSid(saved);
       } catch (e) { setErr(e.message); }
       setLoading(false);
@@ -276,6 +292,7 @@ function LoginView({ onLogin }) {
       if (pin !== pin2) return setErr("兩次 PIN 不一致");
       await db.collection("students").doc(sid).set({ pin, updatedAt: new Date().toISOString() }, { merge: true });
       sessionStorage.setItem(SS_SID, sid);
+      try { localStorage.setItem(LS_LAST_SID, sid); } catch (e) {}
       onLogin({ ...stu, pin });
       return;
     }
@@ -285,6 +302,7 @@ function LoginView({ onLogin }) {
     }
     if (String(pin) !== String(stu.pin)) return setErr("PIN 錯誤");
     sessionStorage.setItem(SS_SID, sid);
+    try { localStorage.setItem(LS_LAST_SID, sid); } catch (e) {}
     onLogin(stu);
   };
 
@@ -333,10 +351,10 @@ function HomeDashboard({ student, maps, scores, cohortPeers, peerScores }) {
   const hwMaps = useMemo(() => {
     const out = {};
     Object.entries(maps.homework || {}).forEach(([id, m]) => {
-      if (mapVisible(m, cohort)) out[id] = m;
+      if (homeworkVisibleForStudent(m, id, cohort, scores.homeworks)) out[id] = m;
     });
     return out;
-  }, [maps.homework, cohort]);
+  }, [maps.homework, cohort, scores.homeworks]);
 
   // Homework status
   const hwStatus = useMemo(() => {
@@ -517,155 +535,167 @@ function HomeDashboard({ student, maps, scores, cohortPeers, peerScores }) {
     return () => { if (chartInstance.current) chartInstance.current.destroy(); };
   }, [domainPcts]);
 
+
   const firstName = student.name || "同學";
+  const overallPctShow = ranking?.pct != null ? Math.round(ranking.pct * 100)
+    : (performance.overall != null ? Math.round(performance.overall * 100) : null);
 
   return (
-    <div className="space-y-5">
-      {/* Hero */}
-      <div className="rounded-3xl bg-gradient-to-br from-indigo-600 via-blue-600 to-sky-500 text-white p-6 md:p-8 shadow-lg relative overflow-hidden">
+    <div className="space-y-6">
+      {/* Hero — 貼近舊版風格 */}
+      <div className="rounded-[28px] bg-gradient-to-r from-[#3b82f6] via-[#4f46e5] to-[#4338ca] text-white p-6 md:p-8 shadow-xl relative overflow-hidden">
+        <div className="absolute right-0 top-0 w-64 h-64 bg-white/5 rounded-full -mr-20 -mt-20 pointer-events-none" />
         <div className="relative z-10">
-          <h1 className="text-2xl md:text-3xl font-black">準備好超越自己了嗎 · {firstName}？</h1>
-          <p className="mt-2 text-indigo-100 text-sm md:text-base">
+          <h1 className="text-2xl md:text-[28px] font-black tracking-tight">準備好超越自己了嗎 · {firstName}？</h1>
+          <p className="mt-2 text-blue-100 text-sm md:text-[15px] leading-relaxed max-w-2xl">
             保持紀律，今天的練習就是明天的 5**。你目前的稱號是
             <span className="text-amber-300 font-black">「{title}」</span>。
           </p>
-          <div className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-3">
-            {/* Ranking + DSE */}
-            <div className="rounded-2xl bg-white/15 border border-white/25 backdrop-blur px-4 py-3">
-              <div className="text-xs text-indigo-100 font-bold">綜合表現</div>
+
+          <div className={`mt-6 grid gap-3 ${showPP ? "grid-cols-2 lg:grid-cols-4" : "grid-cols-2"}`}>
+            {/* 綜合排名 */}
+            <div className="rounded-2xl bg-gradient-to-b from-white/25 to-white/10 border border-white/30 px-4 py-4 backdrop-blur-sm shadow-inner">
+              <div className="text-xs font-bold text-blue-100 flex items-center gap-1">⭐ 綜合排名</div>
               {ranking && !ranking.bottom25 ? (
-                <div className="text-3xl font-black mt-1">#{ranking.rank}</div>
-              ) : ranking ? (
-                <div className="text-3xl font-black mt-1">{Math.round((ranking.pct || 0) * 100)}%</div>
-              ) : performance.overall != null ? (
-                <div className="text-3xl font-black mt-1">{Math.round(performance.overall * 100)}%</div>
+                <div className="text-4xl font-black mt-1 text-amber-300 drop-shadow">#{ranking.rank}</div>
+              ) : overallPctShow != null ? (
+                <div className="text-4xl font-black mt-1 text-amber-300">{overallPctShow}%</div>
               ) : (
-                <div className="text-xl font-bold mt-1 text-indigo-100">—</div>
+                <div className="text-3xl font-black mt-1 text-blue-100">—</div>
               )}
-              <div className="text-[11px] text-indigo-100 mt-0.5">
+              <div className="text-xs text-blue-100/90 mt-1">
                 {ranking && !ranking.bottom25
-                  ? `全組 ${ranking.n} 人 · ${Math.round((ranking.pct || 0) * 100)}%`
-                  : ranking
-                    ? "繼續加油（排名暫隱藏）"
-                    : "綜合得分率"}
+                  ? `${overallPctShow != null ? overallPctShow + "%" : ""} · 全組 ${ranking.n} 人`
+                  : ranking ? "繼續努力" : "綜合得分率"}
               </div>
-              <div className="mt-2 pt-2 border-t border-white/20 flex items-center gap-2">
-                <span className="text-[11px] text-indigo-100">大考預估</span>
-                <span className={`text-sm font-black px-2 py-0.5 rounded-lg border ${performance.grade.color}`}>
+              <div className="mt-3 pt-2 border-t border-white/20 flex items-center justify-between gap-2">
+                <span className="text-[11px] text-blue-100">大考預估</span>
+                <span className={`text-sm font-black px-2.5 py-0.5 rounded-lg border bg-white/90 ${performance.grade.color}`}>
                   {performance.grade.level}
                 </span>
               </div>
             </div>
 
             {showPP && (
-              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-3">
-                <div className="text-xs text-indigo-100 font-bold">Pastpaper 題數</div>
-                <div className="text-3xl font-black mt-1">{ppStats.qCount}</div>
-                <div className="text-[11px] text-indigo-100">已練習題目</div>
+              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-4">
+                <div className="text-xs font-bold text-blue-100">PASTPAPER 題數</div>
+                <div className="text-4xl font-black mt-1">{ppStats.qCount}</div>
+                <div className="text-xs text-blue-100/80 mt-1">已練習題目</div>
               </div>
             )}
             {showPP && (
-              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-3">
-                <div className="text-xs text-indigo-100 font-bold">PP 命中率</div>
-                <div className="text-3xl font-black mt-1">
+              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-4">
+                <div className="text-xs font-bold text-blue-100">PP 命中率</div>
+                <div className="text-4xl font-black mt-1">
                   {ppStats.hitRate != null ? Math.round(ppStats.hitRate * 100) + "%" : "—"}
                 </div>
-                <div className="text-[11px] text-indigo-100">歷屆得分率</div>
+                <div className="text-xs text-blue-100/80 mt-1">歷屆得分率</div>
               </div>
             )}
-            <div className={`rounded-2xl bg-white/10 border border-white/20 px-4 py-3 ${!showPP ? "md:col-span-2" : ""}`}>
-              <div className="text-xs text-indigo-100 font-bold">稱號</div>
-              <div className="text-xl font-black mt-1 text-amber-200 leading-snug">{title}</div>
-              <div className="text-[11px] text-indigo-100 mt-1">功課·小測·考試·Pastpaper</div>
+
+            <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-4">
+              <div className="text-xs font-bold text-blue-100">稱號</div>
+              <div className="text-xl md:text-2xl font-black mt-2 text-amber-300 leading-snug">{title}</div>
+              <div className="text-[11px] text-blue-100/80 mt-2">功課 · 小測 · 考試 · PP</div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Radar */}
-      <div className="bg-white rounded-3xl border p-5 shadow-sm">
-        <div className="font-bold text-slate-700 flex items-center gap-2">
-          <span className="text-sky-500">📈</span> 我的領域能力值
-          <span className="text-xs font-normal text-slate-400">（功課 + 小測 + 考試 + Pastpaper）</span>
+      {/* 雷達 */}
+      <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-6">
+        <div className="font-bold text-slate-700 text-[15px] flex items-center gap-2">
+          <span className="text-sky-500 text-lg">📊</span>
+          我的領域能力值
+          <span className="text-xs font-normal text-slate-400">功課 + 小測 + 考試 + Pastpaper</span>
         </div>
-        <div className="h-72 mt-2"><canvas ref={chartRef} /></div>
+        <div className="h-80 mt-2"><canvas ref={chartRef} /></div>
       </div>
 
-      {/* Homework + cards */}
+      {/* 下方卡片列 */}
       <div className="grid lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-1 bg-white rounded-3xl border p-5 shadow-sm space-y-3">
-          <div className="flex items-center gap-2 font-bold text-slate-800">
-            <span className="w-9 h-9 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center text-lg">📘</span>
-            日常功課狀態
+        <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-5 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center text-xl">📘</div>
+            <div className="font-bold text-slate-800">日常功課狀態</div>
           </div>
-          <div className="text-3xl font-black text-indigo-700">
-            {hwStatus.done.length}<span className="text-lg text-slate-400 font-bold"> / {hwStatus.total} 份已改正</span>
+          <div className="text-3xl font-black text-indigo-600">
+            {hwStatus.done.length}
+            <span className="text-base text-slate-400 font-bold"> / {hwStatus.total} 份已改正</span>
           </div>
           <div className="flex flex-wrap gap-2">
             {!!hwStatus.missing.length && (
-              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 border">未交 {hwStatus.missing.length}</span>
+              <span className="text-xs font-black px-3 py-1.5 rounded-xl bg-slate-100 text-slate-700">⚠️ 未交 {hwStatus.missing.length}</span>
             )}
             {!!hwStatus.pending.length && (
-              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200">待改正 {hwStatus.pending.length}</span>
+              <span className="text-xs font-black px-3 py-1.5 rounded-xl bg-amber-50 text-amber-800 border border-amber-200">待改正 {hwStatus.pending.length}</span>
             )}
             {!!hwStatus.perfect.length && (
-              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">完美 {hwStatus.perfect.length}</span>
+              <span className="text-xs font-black px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100">完美 {hwStatus.perfect.length}</span>
             )}
           </div>
-          <div className="divide-y max-h-80 overflow-auto">
-            {[...hwStatus.missing, ...hwStatus.pending, ...hwStatus.done].map(item => {
-              const stLabel = item.status === "MISSING" ? "未交" :
-                item.status === "PENDING" ? "未改正" :
-                item.status === "PERFECT" ? "完美" :
-                item.status === "DONE" ? "已改正" :
-                item.status === "EXEMPT" ? "豁免" : item.status;
-              const stCls = item.status === "MISSING" ? "text-slate-600" :
-                item.status === "PENDING" ? "text-amber-700" :
-                item.status === "PERFECT" ? "text-emerald-600" : "text-blue-600";
-              return (
-                <div key={item.id} className="py-2.5">
-                  <div className="flex justify-between gap-2 items-start">
-                    <div className="font-bold text-sm text-slate-800">{item.title}</div>
-                    <div className={`text-xs font-black shrink-0 ${stCls}`}>
-                      {stLabel}{item.scoreText ? ` (${item.scoreText})` : ""}
-                    </div>
+          <div className="divide-y divide-slate-100 max-h-96 overflow-auto">
+            {!hwStatus.missing.length && !hwStatus.pending.length && hwStatus.done.length > 0 && (
+              <p className="text-sm text-emerald-600 font-bold py-2">全部跟進中的功課已改正 👍</p>
+            )}
+            {[...hwStatus.missing, ...hwStatus.pending].map(item => (
+              <div key={item.id} className="py-3">
+                <div className="flex justify-between gap-2 items-start">
+                  <div className="font-bold text-sm text-slate-800">{item.title}</div>
+                  <div className={`text-xs font-black shrink-0 ${item.status === "MISSING" ? "text-slate-600" : "text-amber-700"}`}>
+                    {item.status === "MISSING" ? "未交" : "未改正"}
+                    {item.scoreText ? ` (${item.scoreText})` : ""}
                   </div>
-                  {!!item.topics.length && (
-                    <div className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">
-                      內容：{item.topics.join("、")}
-                    </div>
-                  )}
                 </div>
-              );
-            })}
-            {!hwStatus.total && <p className="text-sm text-slate-400 py-4">暫時沒有此群組的功課</p>}
+                {!!item.topics.length && (
+                  <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">內容：{item.topics.join("、")}</div>
+                )}
+              </div>
+            ))}
+            {hwStatus.done.slice(0, 5).map(item => (
+              <div key={item.id} className="py-2 opacity-70">
+                <div className="flex justify-between gap-2 text-sm">
+                  <span className="font-semibold text-slate-600">{item.title}</span>
+                  <span className="text-xs font-bold text-emerald-600">
+                    {item.status === "PERFECT" ? "完美" : "已改正"}
+                    {item.scoreText ? ` (${item.scoreText})` : ""}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {!hwStatus.total && (
+              <p className="text-sm text-slate-400 py-6 text-center">此群組暫時沒有指派功課</p>
+            )}
           </div>
         </div>
 
-        <div className="bg-white rounded-3xl border p-5 shadow-sm">
-          <div className="text-sm font-bold text-slate-500 mb-2">課堂小測</div>
+        <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-5">
+          <div className="text-sm font-bold text-slate-500 mb-3">課堂小測</div>
           {performance.quiz != null ? (
             <>
-              <div className="text-3xl font-black text-slate-800">{Math.round(performance.quiz * 100)}%</div>
+              <div className="text-4xl font-black text-slate-800">{Math.round(performance.quiz * 100)}%</div>
               <div className="text-xs text-slate-400 mt-1">平均得分率</div>
+              <div className="mt-4 h-2 rounded-full bg-slate-100 overflow-hidden">
+                <div className="h-full bg-sky-500 rounded-full" style={{ width: Math.round(performance.quiz * 100) + "%" }} />
+              </div>
             </>
           ) : (
-            <div className="text-slate-400 text-sm py-6">尚無小測成績</div>
+            <div className="text-slate-400 text-sm py-10 text-center">尚無小測成績</div>
           )}
         </div>
 
-        <div className="bg-white rounded-3xl border p-5 shadow-sm">
-          <div className="text-sm font-bold text-slate-500 mb-2">考試表現</div>
+        <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-5">
+          <div className="text-sm font-bold text-slate-500 mb-3">考試 · 大考預估</div>
           {performance.exam != null ? (
             <>
-              <div className="text-3xl font-black text-slate-800">{Math.round(performance.exam * 100)}</div>
+              <div className="text-4xl font-black text-slate-800">{Math.round(performance.exam * 100)}</div>
               <div className="text-xs text-slate-400 mt-1">平均加權 / 100</div>
-              <div className={`inline-block mt-2 text-sm font-black px-2 py-1 rounded-lg border ${performance.grade.color}`}>
+              <div className={`inline-block mt-4 text-base font-black px-3 py-1.5 rounded-xl border ${performance.grade.color}`}>
                 預估 {performance.grade.level}
               </div>
             </>
           ) : (
-            <div className="text-slate-400 text-sm py-6">尚無考試成績</div>
+            <div className="text-slate-400 text-sm py-10 text-center">尚無考試成績</div>
           )}
         </div>
       </div>
@@ -761,30 +791,30 @@ function StudentShell({ student, onLogout }) {
   ];
 
   return (
-    <div className="min-h-screen bg-slate-100">
-      <header className="bg-gradient-to-r from-indigo-800 to-blue-700 text-white">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="min-h-screen bg-[#f1f5f9]">
+      <header className="bg-[#1e3a8a] text-white shadow-md">
+        <div className="max-w-5xl mx-auto px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-full bg-white/20 flex items-center justify-center font-black text-lg">
+            <div className="w-10 h-10 rounded-full bg-white/15 flex items-center justify-center font-black">
               {(student.name || "?").charAt(0)}
             </div>
             <div>
-              <div className="font-black text-lg leading-tight">{student.name}</div>
-              <div className="text-xs text-indigo-200">{student.cohort || ""} · {student.class}-{student.num}</div>
+              <div className="font-black leading-tight">{student.name}</div>
+              <div className="text-[11px] text-blue-200">{student.cohort || ""} · {student.class}-{student.num}</div>
             </div>
           </div>
-          <button className="text-sm font-bold text-indigo-100 hover:text-white" onClick={onLogout}>登出</button>
+          <button className="text-sm font-bold text-blue-100 hover:text-white border border-white/20 rounded-lg px-3 py-1.5" onClick={onLogout}>登出</button>
         </div>
-        <div className="max-w-5xl mx-auto px-4 flex gap-1 overflow-x-auto pb-0">
-          {tabs.map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)}
-              className={`px-4 py-2.5 text-sm font-bold rounded-t-xl whitespace-nowrap ${tab === t.id ? "bg-slate-100 text-indigo-800" : "text-indigo-100 hover:bg-white/10"}`}>
-              {t.label}
+        <div className="max-w-5xl mx-auto px-4 flex gap-1 overflow-x-auto">
+          {tabs.map(tb => (
+            <button key={tb.id} onClick={() => setTab(tb.id)}
+              className={`px-4 py-2.5 text-sm font-bold rounded-t-lg whitespace-nowrap border-b-2 ${tab === tb.id ? "bg-white text-indigo-800 border-white" : "text-blue-100 border-transparent hover:bg-white/10"}`}>
+              {tb.label}
             </button>
           ))}
         </div>
       </header>
-      <main className="max-w-5xl mx-auto px-4 py-6">
+      <main className="max-w-5xl mx-auto px-4 py-6 bg-[#f8fafc] min-h-[70vh]">
         {loading && <div className="text-center text-slate-400 py-16">載入你的數據…</div>}
         {!loading && tab === "home" && (
           <HomeDashboard student={student} maps={maps} scores={scores} cohortPeers={cohortPeers} peerScores={peerScores} />
