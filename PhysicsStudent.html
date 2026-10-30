@@ -73,6 +73,37 @@ const DOMAIN_LABELS = {
   "1": "熱學", "2": "力學", "3": "波動", "4": "電磁學", "5": "放射學",
   "E3": "能量", "E4": "醫學"
 };
+let SYLLABUS_TOPICS = {};
+async function loadSyllabusTopics() {
+  try {
+    const snap = await db.collection("syllabus").get();
+    snap.forEach(d => {
+      const data = d.data() || {};
+      const topics = data.data || data.topics || data;
+      if (topics && typeof topics === "object") {
+        Object.assign(SYLLABUS_TOPICS, topics.data && typeof topics.data === "object" ? topics.data : topics);
+      }
+    });
+  } catch (e) { console.warn(e); }
+  return SYLLABUS_TOPICS;
+}
+function getSyllabusTableText(topicIds) {
+  const topics = SYLLABUS_TOPICS || {};
+  const lines = ["課題編號\t範疇\t課題名稱\t學習要求"];
+  const idList = topicIds && topicIds.length ? [...new Set(topicIds.filter(Boolean))] : Object.keys(topics);
+  idList.forEach(id => {
+    const val = topics[id];
+    if (typeof val === "object" && val !== null) {
+      lines.push(`${id}\t${val.section || ""}\t${val.topic || val.name || ""}\t${val.desc || ""}`);
+    } else if (val != null) {
+      lines.push(`${id}\t\t${val}\t`);
+    } else {
+      lines.push(`${id}\t\t\t`);
+    }
+  });
+  return lines.length <= 1 ? "（課程大綱參考：請按 topicId 對照 DSE 物理課程）" : lines.join("\n");
+}
+
 function estimateDseLevel(pct01) {
   const p = (pct01 == null || isNaN(pct01)) ? null : (pct01 > 1 ? pct01 / 100 : pct01);
   if (p == null) return { level: "—", color: "bg-slate-100 text-slate-500 border-slate-200" };
@@ -915,7 +946,7 @@ function HomeDashboard({ student, maps, scores, makeup, cohortPeers, peerScores 
 }
 
 
-function SchoolProgressView({ student, maps, scores, makeup }) {
+function SchoolProgressView({ student, maps, scores, makeup, onGoAi }) {
   const cohort = student.cohort || "";
   const [section, setSection] = useState("hw"); // hw | quiz | exam
 
@@ -1013,9 +1044,15 @@ function SchoolProgressView({ student, maps, scores, makeup }) {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="text-2xl font-black text-slate-800">校內進度</h2>
-        <p className="text-base text-slate-500 mt-1">功課 · 小測 · 考試詳情（只顯示與你相關的項目）</p>
+      <div className="flex flex-wrap justify-between gap-3 items-start">
+        <div>
+          <h2 className="text-2xl font-black text-slate-800">校內進度</h2>
+          <p className="text-base text-slate-500 mt-1">功課 · 小測 · 考試詳情（只顯示與你相關的項目）</p>
+        </div>
+        <button type="button" onClick={() => onGoAi && onGoAi(section === "quiz" ? "quiz" : section === "exam" ? "exam" : "hw")}
+          className="text-base font-black px-5 py-2.5 rounded-2xl bg-violet-600 text-white shadow hover:bg-violet-700">
+          ✨ AI 溫習
+        </button>
       </div>
 
       {/* 總覽數字 */}
@@ -1251,7 +1288,7 @@ function yearCompositeScore(parts) {
   };
 }
 
-function PastpaperStudentView({ student, maps, scores, setScores }) {
+function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
   const ppMaps = maps.pastpaper || {};
   const [yearFilter, setYearFilter] = useState("ALL");
   const [editPaperId, setEditPaperId] = useState("");
@@ -1439,6 +1476,10 @@ function PastpaperStudentView({ student, maps, scores, setScores }) {
           <h2 className="text-2xl font-black text-slate-800">歷屆試題</h2>
           <p className="text-base text-slate-500 mt-1">自行輸入分數 · 按年份睇表現與等級預估（P1 60% + P2 20%，化算回 100；SBA 不計）</p>
         </div>
+        <button type="button" onClick={() => onGoAi && onGoAi("pp")}
+          className="text-base font-black px-5 py-2.5 rounded-2xl bg-violet-600 text-white shadow hover:bg-violet-700">
+          ✨ AI 溫習
+        </button>
         <label className="text-sm font-bold text-slate-600">年份
           <select className="ml-2 border-2 rounded-xl px-3 py-2 text-base font-bold" value={yearFilter} onChange={e => setYearFilter(e.target.value)}>
             <option value="ALL">全部年份</option>
@@ -1608,8 +1649,316 @@ function PastpaperStudentView({ student, maps, scores, setScores }) {
 }
 
 
+
+function collectTopicStatsFromPapers(items) {
+  // items: [{ map, rec, label }]
+  const topicBag = {};
+  items.forEach(({ map, rec }) => {
+    if (!map?.questions) return;
+    const body = rec || {};
+    map.questions.forEach(q => {
+      const tid = q.topicId || "（無）";
+      const raw = body[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      if (!topicBag[tid]) {
+        topicBag[tid] = { tid, label: q.topicDesc || tid, score: 0, max: 0, weakQs: [] };
+      }
+      topicBag[tid].score += sc;
+      topicBag[tid].max += q.max || 1;
+      if (sc < (q.max || 1)) {
+        topicBag[tid].weakQs.push({
+          id: q.id,
+          desc: q.topicDesc || "",
+          score: sc,
+          max: q.max || 1
+        });
+      }
+      if (q.topicDesc) topicBag[tid].label = q.topicDesc;
+    });
+  });
+  return Object.values(topicBag).map(t => ({
+    ...t,
+    pct: t.max > 0 ? Math.round((t.score / t.max) * 100) : null
+  })).sort((a, b) => String(a.tid).localeCompare(String(b.tid), undefined, { numeric: true }));
+}
+
+function AiReviewView({ student, maps, scores, initialSource }) {
+  const cohort = student.cohort || "";
+  const [source, setSource] = useState(initialSource || "hw"); // hw | quiz | exam | pp
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [selectedTopics, setSelectedTopics] = useState([]);
+  const [lang, setLang] = useState("繁體中文");
+  const [mc, setMc] = useState(10);
+  const [lq, setLq] = useState(0);
+  const [level, setLevel] = useState("中");
+  const [extra, setExtra] = useState({ practice: true, notes: false, ppt: false, explainImg: false });
+
+  useEffect(() => {
+    if (initialSource) setSource(initialSource);
+  }, [initialSource]);
+
+  useEffect(() => {
+    setSelectedIds([]);
+    setSelectedTopics([]);
+  }, [source]);
+
+  const sourceItems = useMemo(() => {
+    const rows = [];
+    if (source === "hw") {
+      Object.entries(maps.homework || {}).forEach(([id, m]) => {
+        if (!homeworkVisibleForStudent(m, id, cohort, scores.homeworks)) return;
+        const sc = scoreOfRec(m, scores.homeworks?.[id]);
+        rows.push({ id, title: m.title || id, map: m, rec: scores.homeworks?.[id] || {}, sc, kind: "功課" });
+      });
+    } else if (source === "quiz") {
+      Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+        if (!mapVisible(m, cohort)) return;
+        const sc = scoreOfRec(m, scores.quizzes?.[id]);
+        rows.push({ id, title: m.title || id, map: m, rec: scores.quizzes?.[id] || {}, sc, kind: "小測" });
+      });
+    } else if (source === "exam") {
+      Object.entries(maps.exam || {}).forEach(([id, m]) => {
+        if (!mapVisible(m, cohort)) return;
+        const st = examWeighted(m, scores.exams?.[id]);
+        const sc = st ? { earned: st.total, max: st.max, pct: st.weighted / 100 } : null;
+        rows.push({ id, title: m.title || id, map: m, rec: scores.exams?.[id] || {}, sc, kind: "考試", weighted: st?.weighted });
+      });
+    } else {
+      Object.entries(maps.pastpaper || {}).forEach(([id, m]) => {
+        const sc = scoreOfRec(m, scores.pastpapers?.[id]);
+        rows.push({ id, title: m.title || id, map: m, rec: scores.pastpapers?.[id] || {}, sc, kind: "Pastpaper" });
+      });
+    }
+    rows.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return rows;
+  }, [source, maps, scores, cohort]);
+
+  const topicPool = useMemo(() => {
+    const chosen = sourceItems.filter(r => selectedIds.includes(r.id));
+    return collectTopicStatsFromPapers(chosen.map(r => ({ map: r.map, rec: r.rec })));
+  }, [sourceItems, selectedIds]);
+
+  const weakTopics = topicPool.filter(t => t.pct == null || t.pct < 60);
+  const strongTopics = topicPool.filter(t => t.pct != null && t.pct >= 60);
+
+  // 選卷後：弱項預選
+  useEffect(() => {
+    setSelectedTopics(weakTopics.map(t => t.tid));
+  }, [selectedIds.join("|"), source, weakTopics.map(t => t.tid).join("|")]);
+
+  const toggleId = (id) => setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const toggleTopic = (tid) => setSelectedTopics(prev => prev.includes(tid) ? prev.filter(x => x !== tid) : [...prev, tid]);
+
+  const buildPrompt = () => {
+    const picked = topicPool.filter(t => selectedTopics.includes(t.tid));
+    const studentName = student.name || "同學";
+    const srcLabel = { hw: "功課", quiz: "小測", exam: "考試", pp: "歷屆試題" }[source] || source;
+    const paperLines = sourceItems.filter(r => selectedIds.includes(r.id)).map(r => {
+      const score = r.weighted != null
+        ? `加權 ${r.weighted.toFixed(1)}/100`
+        : (r.sc ? `${Math.round(r.sc.earned)}/${Math.round(r.sc.max)}（${Math.round(r.sc.pct * 100)}%）` : "無分");
+      return `- ${r.title}（${r.id}）：${score}`;
+    }).join("\n");
+
+    const weakLines = picked.length
+      ? picked.map(t => {
+          const qs = (t.weakQs || []).slice(0, 6).map(q =>
+            `    · ${q.id}: ${q.desc || "概念不穩"}（${q.score}/${q.max}）`
+          ).join("\n");
+          return `- [${t.tid}] ${t.label}｜掌握度 ${t.pct != null ? t.pct + "%" : "—"}\n${qs || "    · （綜合薄弱）"}`;
+        }).join("\n")
+      : "- （尚未指定弱項：請按已選範圍出由淺入深鞏固練習）";
+
+    const syllabus = getSyllabusTableText(picked.map(t => t.tid));
+    const outs = [];
+    if (extra.practice) outs.push("互動式練習（Canvas）");
+    if (extra.notes) outs.push("溫習筆記");
+    if (extra.ppt) outs.push("PPT 大綱");
+    if (extra.explainImg) outs.push("解說圖描述");
+
+    return `【身份】你是香港 DSE 物理科老師。
+
+【任務】為學生【${studentName}】（${student.class}-${student.num}）設計【AI 溫習】材料，針對其在「${srcLabel}」中的失分點。
+
+【已選${srcLabel}】
+${paperLines || "（未選）"}
+
+【學生弱項／課題（含不會的題目描述）】
+${weakLines}
+
+【課程大綱參考】
+${syllabus}
+
+【基本設定】
+- 語言：${lang}
+- 難度：${level}
+- 多項選擇題 (MC)：${mc} 題
+- 長題目 (LQ)：${lq} 題
+- 產出：${outs.join("、") || "練習"}
+- ★ 若包含練習：必須用 AI **Canvas（畫布）** 做成【互動式小測驗】——逐題顯示、學生作答後再給對錯與簡短解說；不要一次公開全部答案。
+
+【要求】
+1. 緊貼上述 topicId 與「不會的題目描述」，由淺入深。
+2. MC 附 4 選項；答錯指出迷思。
+3. 每題標明 topicId。
+4. 開頭用一句話鼓勵 ${studentName}。
+${extra.notes ? "5. 另附溫習筆記：條列重點、公式、常見陷阱。\\n" : ""}${extra.ppt ? "5. 另附 PPT 大綱 8–12 頁（每頁標題+要點）。\\n" : ""}${extra.explainImg ? "5. 另附解說圖描述（每弱項一段，方便 AI 繪圖）。\\n" : ""}`;
+  };
+
+  const copyAndOpenGemini = async () => {
+    const prompt = buildPrompt();
+    try {
+      await navigator.clipboard.writeText(prompt);
+    } catch (e) {
+      alert("複製失敗，請手動全選 Prompt");
+      return;
+    }
+    window.open("https://gemini.google.com/app", "_blank", "noopener,noreferrer");
+    alert("已複製 Prompt，並開啟 Gemini。請在 Gemini 貼上（Ctrl/Cmd+V）。");
+  };
+
+  const sources = [
+    { id: "hw", label: "功課" },
+    { id: "quiz", label: "小測" },
+    { id: "exam", label: "考試" },
+    { id: "pp", label: "Pastpaper" }
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-2xl font-black text-slate-800">AI 溫習</h2>
+        <p className="text-base text-slate-500 mt-1">選範圍 → 勾弱項 → 複製 Prompt → 自動開啟 Gemini</p>
+      </div>
+
+      {/* Step 1 source */}
+      <div className="bg-white rounded-3xl border p-5 shadow-sm space-y-3">
+        <div className="text-base font-black text-slate-700">① 選擇類型</div>
+        <div className="flex flex-wrap gap-2">
+          {sources.map(s => (
+            <button key={s.id} type="button" onClick={() => setSource(s.id)}
+              className={`px-5 py-2.5 rounded-2xl text-base font-black border-2 ${source === s.id ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-600 border-slate-200"}`}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Step 2 items */}
+      <div className="bg-white rounded-3xl border p-5 shadow-sm space-y-3">
+        <div className="flex flex-wrap justify-between gap-2 items-center">
+          <div className="text-base font-black text-slate-700">② 選擇項目（可多選）</div>
+          <div className="flex gap-2">
+            <button type="button" className="text-sm font-bold text-indigo-600" onClick={() => setSelectedIds(sourceItems.map(r => r.id))}>全選</button>
+            <button type="button" className="text-sm font-bold text-slate-500" onClick={() => setSelectedIds([])}>清空</button>
+          </div>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-2 max-h-64 overflow-auto">
+          {sourceItems.map(r => {
+            const on = selectedIds.includes(r.id);
+            const scoreTxt = r.weighted != null
+              ? `${r.weighted.toFixed(1)}/100`
+              : (r.sc ? `${Math.round(r.sc.pct * 100)}%` : "無分");
+            return (
+              <label key={r.id} className={`flex items-center gap-3 rounded-2xl border-2 px-3 py-3 cursor-pointer ${on ? "border-indigo-500 bg-indigo-50" : "border-slate-100 bg-slate-50"}`}>
+                <input type="checkbox" checked={on} onChange={() => toggleId(r.id)} className="w-5 h-5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-bold text-slate-800 truncate text-base">{r.title}</div>
+                  <div className="text-sm text-slate-500">{scoreTxt}</div>
+                </div>
+              </label>
+            );
+          })}
+          {!sourceItems.length && <div className="text-slate-400 text-base col-span-2 py-6 text-center">此類型暫無項目</div>}
+        </div>
+      </div>
+
+      {/* Step 3 topics */}
+      <div className="bg-white rounded-3xl border p-5 shadow-sm space-y-4">
+        <div className="text-base font-black text-slate-700">③ 課題掌握度（&lt;60% 已預選）</div>
+        {!selectedIds.length && <p className="text-slate-400">請先選擇至少一份項目</p>}
+        {!!selectedIds.length && !topicPool.length && (
+          <p className="text-slate-400">所選項目未有題目 topic 或未入分，仍可直接生成通用溫習 Prompt</p>
+        )}
+        {!!weakTopics.length && (
+          <div>
+            <div className="text-sm font-black text-rose-700 mb-2">弱項 &lt; 60%（預選）· {weakTopics.length}</div>
+            <div className="space-y-2 max-h-48 overflow-auto">
+              {weakTopics.map(t => (
+                <label key={t.tid} className={`flex gap-3 items-start rounded-xl border px-3 py-2 cursor-pointer ${selectedTopics.includes(t.tid) ? "border-rose-400 bg-rose-50" : "border-slate-100"}`}>
+                  <input type="checkbox" className="mt-1" checked={selectedTopics.includes(t.tid)} onChange={() => toggleTopic(t.tid)} />
+                  <div>
+                    <div className="font-bold text-base"><span className="mono text-rose-700">{t.tid}</span> {t.label} · {t.pct != null ? t.pct + "%" : "—"}</div>
+                    {(t.weakQs || []).slice(0, 3).map(q => (
+                      <div key={q.id} className="text-sm text-slate-600">· {q.id} {q.desc}（{q.score}/{q.max}）</div>
+                    ))}
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+        {!!strongTopics.length && (
+          <div>
+            <div className="text-sm font-black text-emerald-700 mb-2">≥ 60%（可自選溫習）· {strongTopics.length}</div>
+            <div className="space-y-2 max-h-40 overflow-auto">
+              {strongTopics.map(t => (
+                <label key={t.tid} className={`flex gap-3 items-start rounded-xl border px-3 py-2 cursor-pointer ${selectedTopics.includes(t.tid) ? "border-indigo-400 bg-indigo-50" : "border-slate-100"}`}>
+                  <input type="checkbox" className="mt-1" checked={selectedTopics.includes(t.tid)} onChange={() => toggleTopic(t.tid)} />
+                  <div className="font-bold text-base"><span className="mono text-emerald-700">{t.tid}</span> {t.label} · {t.pct}%</div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Step 4 prompt */}
+      <div className="bg-gradient-to-br from-violet-50 to-indigo-50 rounded-3xl border-2 border-violet-200 p-5 space-y-4">
+        <div className="text-base font-black text-violet-900">④ 生成設定與 Prompt</div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <label className="text-sm font-bold">語言
+            <select className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={lang} onChange={e => setLang(e.target.value)}>
+              <option value="繁體中文">繁體中文</option>
+              <option value="English">English</option>
+            </select>
+          </label>
+          <label className="text-sm font-bold">難度
+            <select className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={level} onChange={e => setLevel(e.target.value)}>
+              <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
+            </select>
+          </label>
+          <label className="text-sm font-bold">MC
+            <input type="number" className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={mc} onChange={e => setMc(parseInt(e.target.value) || 0)} />
+          </label>
+          <label className="text-sm font-bold">LQ
+            <input type="number" className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={lq} onChange={e => setLq(parseInt(e.target.value) || 0)} />
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {[["practice", "練習（Canvas）"], ["notes", "筆記"], ["ppt", "PPT"], ["explainImg", "解說圖"]].map(([k, lab]) => (
+            <label key={k} className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 text-sm font-bold cursor-pointer bg-white ${extra[k] ? "border-violet-500" : "border-slate-200"}`}>
+              <input type="checkbox" checked={!!extra[k]} onChange={e => setExtra(x => ({ ...x, [k]: e.target.checked }))} />
+              {lab}
+            </label>
+          ))}
+        </div>
+        <button type="button" onClick={copyAndOpenGemini}
+          className="w-full md:w-auto bg-violet-600 hover:bg-violet-700 text-white font-black text-lg px-8 py-3.5 rounded-2xl shadow">
+          複製 Prompt 並開啟 Gemini
+        </button>
+        <p className="text-sm text-violet-800">會複製含弱項題目描述、topicId、課程大綱的 Prompt，並開新分頁到 Gemini。</p>
+      </div>
+    </div>
+  );
+}
+
+
 function StudentShell({ student, onLogout }) {
   const [tab, setTab] = useState("home");
+  const [aiSource, setAiSource] = useState("hw");
   const [loading, setLoading] = useState(true);
   const [maps, setMaps] = useState({ homework: {}, quiz: {}, exam: {}, pastpaper: {} });
   const [scores, setScores] = useState({ homeworks: {}, quizzes: {}, exams: {}, pastpapers: {} });
@@ -1622,6 +1971,7 @@ function StudentShell({ student, onLogout }) {
     (async () => {
       setLoading(true);
       try {
+        await loadSyllabusTopics();
         const [hw, quiz, exam, pp, qMk, eMk] = await Promise.all([
           loadCollectionMaps("homeworkMaps"),
           loadCollectionMaps("quizMaps"),
@@ -1695,7 +2045,7 @@ function StudentShell({ student, onLogout }) {
     { id: "home", label: "總覽" },
     { id: "school", label: "校內進度" },
     { id: "pp", label: "歷屆試題" },
-    { id: "ai", label: "AI 補底" },
+    { id: "ai", label: "AI 溫習" },
     { id: "rank", label: "英雄榜" }
   ];
 
@@ -1729,15 +2079,20 @@ function StudentShell({ student, onLogout }) {
           <HomeDashboard student={student} maps={maps} scores={scores} makeup={makeup} cohortPeers={cohortPeers} peerScores={peerScores} />
         )}
         {!loading && tab === "school" && (
-          <SchoolProgressView student={student} maps={maps} scores={scores} makeup={makeup} />
+          <SchoolProgressView student={student} maps={maps} scores={scores} makeup={makeup}
+            onGoAi={(src) => { setAiSource(src || "hw"); setTab("ai"); }} />
         )}
         {!loading && tab === "pp" && (
-          <PastpaperStudentView student={student} maps={maps} scores={scores} setScores={setScores} />
+          <PastpaperStudentView student={student} maps={maps} scores={scores} setScores={setScores}
+            onGoAi={(src) => { setAiSource(src || "pp"); setTab("ai"); }} />
         )}
-        {!loading && tab !== "home" && tab !== "school" && tab !== "pp" && (
+        {!loading && tab === "ai" && (
+          <AiReviewView student={student} maps={maps} scores={scores} initialSource={aiSource} />
+        )}
+        {!loading && tab !== "home" && tab !== "school" && tab !== "pp" && tab !== "ai" && (
           <div className="bg-white rounded-3xl border p-12 text-center text-slate-400">
             <div className="text-lg font-bold text-slate-600 mb-2">{tabs.find(x => x.id === tab)?.label}</div>
-            下一批會接上此分頁（AI 補底 / 英雄榜）
+            下一批會接上此分頁（英雄榜）
           </div>
         )}
       </main>
