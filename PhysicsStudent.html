@@ -1,202 +1,837 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Physics Student - Firebase</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Physics Student · Firebase</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.9/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  body{font-family:"Segoe UI","PingFang TC","Noto Sans TC",sans-serif}
+  .mono{font-family:ui-monospace,Menlo,monospace}
+</style>
 </head>
-<body class="bg-slate-50 min-h-screen text-slate-800">
-  <div id="root"></div>
-  <script>
-    const firebaseConfig = {
-      apiKey: "AIzaSyAzHIgH35NDtvCRAULOE3_TX9aBa9b_qcs",
-      authDomain: "hoyuphysics.firebaseapp.com",
-      projectId: "hoyuphysics",
-      storageBucket: "hoyuphysics.firebasestorage.app",
-      messagingSenderId: "409265879054",
-      appId: "1:409265879054:web:ebf3bdf94c9025d6b6e45f"
-    };
-    firebase.initializeApp(firebaseConfig);
-    const db = firebase.firestore();
-    const SS_STUDENT = "physics_student_id";
-    const SS_ADMIN = "physics_student_admin";
+<body class="bg-slate-100 text-slate-800">
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+/** @jsxRuntime classic */
+/** @jsx React.createElement */
+/** @jsxFrag React.Fragment */
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-    function el(tag, attrs, children) {
-      const n = document.createElement(tag);
-      if (attrs) Object.entries(attrs).forEach(([k, v]) => {
-        if (k === "className") n.className = v;
-        else if (k === "onClick") n.onclick = v;
-        else if (k === "value") n.value = v;
-        else if (v != null) n.setAttribute(k, v);
-      });
-      (children || []).forEach(c => {
-        if (c == null) return;
-        n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-      });
-      return n;
-    }
-    function hasPin(stu) { return stu && stu.pin != null && String(stu.pin).trim() !== ""; }
-    async function getAdminPin() {
-      const snap = await db.collection("config").doc("app").get();
-      return (snap.exists && snap.data().adminPin) ? String(snap.data().adminPin) : "1357";
-    }
-    async function loadAllStudents() {
-      const snap = await db.collection("students").get();
-      const list = [];
-      snap.forEach(d => list.push(Object.assign({}, d.data(), { id: d.id })));
-      list.sort(function(a,b){ return String(a.class||"").localeCompare(String(b.class||"")) || (Number(a.num)||0)-(Number(b.num)||0); });
-      return list;
-    }
-    async function loadStudent(id) {
-      const snap = await db.collection("students").doc(id).get();
-      return snap.exists ? Object.assign({}, snap.data(), { id: snap.id }) : null;
-    }
-    async function loadSubScores(studentId, sub) {
-      const snap = await db.collection("scores").doc(studentId).collection(sub).get();
-      const out = {}; snap.forEach(function(d){ out[d.id] = d.data(); }); return out;
-    }
-    async function loadMapTitles(col) {
-      const snap = await db.collection(col).get();
-      const out = {}; snap.forEach(function(d){ out[d.id] = (d.data()||{}).title || d.id; }); return out;
-    }
-    function summarizePaper(data) {
-      const scores = (data && data.scores && typeof data.scores === "object") ? data.scores : data;
-      if (!scores || typeof scores !== "object") return { preview: "-" };
-      const keys = Object.keys(scores).filter(function(k){ return ["updatedAt","remakeStatus","remarks","gradingDate","remakeDate","_id"].indexOf(k)<0; });
-      var answered = 0;
-      keys.forEach(function(k){ var v=scores[k]; if (v!==undefined&&v!==null&&String(v).trim()!=="") answered++; });
-      return { preview: answered ? answered + " 題有紀錄" : "-" };
-    }
-    function labelStudent(s) { return (s.class||"")+"-"+(s.num!=null?s.num:"")+" "+(s.name||"")+" ("+s.id+")"; }
+const firebaseConfig = {
+  apiKey: "AIzaSyAzHIgH35NDtvCRAULOE3_TX9aBa9b_qcs",
+  authDomain: "hoyuphysics.firebaseapp.com",
+  projectId: "hoyuphysics",
+  storageBucket: "hoyuphysics.firebasestorage.app",
+  messagingSenderId: "409265879054",
+  appId: "1:409265879054:web:ebf3bdf94c9025d6b6e45f"
+};
+if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
 
-    async function renderLogin() {
-      var root = document.getElementById("root");
-      root.innerHTML = "";
-      root.appendChild(el("div",{className:"text-center py-20 text-slate-400"},["載入中…"]));
-      var students = [];
-      try { students = await loadAllStudents(); }
-      catch(e) { root.innerHTML=""; root.appendChild(el("div",{className:"max-w-md mx-auto mt-20 p-6 bg-white border rounded-2xl text-red-600"},["Error: "+e.message])); return; }
-      root.innerHTML = "";
-      var opts = [el("option",{value:""},["— 請選擇 —"])];
-      students.forEach(function(s){ opts.push(el("option",{value:s.id},[labelStudent(s)])); });
-      var card = el("div",{className:"max-w-md mx-auto mt-12 bg-white rounded-2xl shadow-lg border p-8"},[
-        el("div",{className:"text-center mb-6"},[
-          el("h1",{className:"text-2xl font-black text-indigo-700"},["Physics 學生"]),
-          el("p",{className:"text-sm text-slate-500 mt-1"},["選擇自己 → 輸入 PIN（首次請自設）"])
-        ]),
-        el("label",{className:"text-xs font-bold text-slate-500"},["學生"]),
-        el("select",{id:"sid",className:"w-full mt-1 mb-3 border rounded-lg px-3 py-2 text-sm"}, opts),
-        el("div",{id:"pinArea"}),
-        el("button",{className:"w-full mt-4 bg-indigo-600 text-white font-bold py-2.5 rounded-lg", onClick: async function(){
-          var sid = document.getElementById("sid").value;
-          if (!sid) return alert("請先選擇學生");
-          var stu = await loadStudent(sid);
-          if (!stu) return alert("找不到");
-          if (!hasPin(stu)) {
-            var p1 = (document.getElementById("newPin")||{}).value||"";
-            var p2 = (document.getElementById("newPin2")||{}).value||"";
-            if (!/^\d{4}$/.test(p1)) return alert("請設定 4 位數字 PIN");
-            if (p1 !== p2) return alert("兩次 PIN 不一致");
-            await db.collection("students").doc(sid).set({ pin: p1, updatedAt: new Date().toISOString() }, { merge:true });
-            sessionStorage.setItem(SS_STUDENT, sid); sessionStorage.removeItem(SS_ADMIN); renderApp(); return;
-          }
-          var pin = (document.getElementById("pin")||{}).value||"";
-          if (String(stu.pin) !== String(pin)) return alert("PIN 不正確");
-          sessionStorage.setItem(SS_STUDENT, sid); sessionStorage.removeItem(SS_ADMIN); renderApp();
-        }},["進入"]),
-        el("button",{className:"w-full mt-3 text-xs text-slate-400", onClick: async function(){
-          var code = prompt("Admin 密語"); if (code==null) return;
-          try {
-            if (String(code) !== String(await getAdminPin())) return alert("密語錯誤");
-            sessionStorage.setItem(SS_ADMIN,"1");
-            var pick = prompt("學生 ID", students[0]?students[0].id:"");
-            if (!pick) return;
-            if (!(await loadStudent(pick.trim()))) return alert("找不到");
-            sessionStorage.setItem(SS_STUDENT, pick.trim()); renderApp();
-          } catch(e) { alert(e.message); }
-        }},["Admin 模式（教師）"])
-      ]);
-      root.appendChild(card);
-      var pinArea = document.getElementById("pinArea");
-      async function refreshPinUI() {
-        pinArea.innerHTML = "";
-        var sid = document.getElementById("sid").value; if (!sid) return;
-        var stu = students.find(function(s){return s.id===sid;}) || await loadStudent(sid); if (!stu) return;
-        if (!hasPin(stu)) {
-          pinArea.appendChild(el("div",{className:"bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2"},[
-            el("p",{className:"text-xs text-amber-800 font-bold"},["首次登入：請設定你的 4 位 PIN"]),
-            el("input",{id:"newPin",type:"password",maxlength:"4",inputmode:"numeric",className:"w-full border rounded-lg px-3 py-2",placeholder:"新 PIN"}),
-            el("input",{id:"newPin2",type:"password",maxlength:"4",inputmode:"numeric",className:"w-full border rounded-lg px-3 py-2",placeholder:"再輸入一次"})
-          ]));
-        } else {
-          pinArea.appendChild(el("div",{},[
-            el("label",{className:"text-xs font-bold text-slate-500"},["PIN"]),
-            el("input",{id:"pin",type:"password",maxlength:"4",inputmode:"numeric",className:"w-full mt-1 border rounded-lg px-3 py-2 text-lg",placeholder:"****"})
-          ]));
-        }
+const SS_SID = "physics_student_id";
+const SS_ADMIN = "physics_student_admin";
+
+// ---------- helpers ----------
+function hasPin(stu) {
+  return stu && stu.pin != null && String(stu.pin).trim() !== "";
+}
+function labelStudent(s) {
+  return `${s.class || ""}-${s.num != null ? s.num : ""} ${s.name || ""}`;
+}
+function isJuniorClass(stu) {
+  const c = String(stu?.class || "").toUpperCase();
+  return /^S[345]/.test(c) || c.startsWith("3") || c.startsWith("4") || c.startsWith("5");
+}
+function quizQuestionScore(q, raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+  if (q.type === "MC") {
+    if (!q.ans) return 0;
+    const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+    return corrects.includes(String(raw).trim().toUpperCase()) ? (q.max || 1) : 0;
+  }
+  const n = parseFloat(raw);
+  return isNaN(n) ? 0 : n;
+}
+function domainFromTopicId(tid) {
+  if (!tid) return null;
+  const s = String(tid);
+  if (s.startsWith("E3") || s.startsWith("e3")) return "E3";
+  if (s.startsWith("E4") || s.startsWith("e4")) return "E4";
+  const c = s.charAt(0);
+  if ("12345".includes(c)) return c;
+  return null;
+}
+const DOMAIN_LABELS = {
+  "1": "熱學", "2": "力學", "3": "波動", "4": "電磁學", "5": "放射學",
+  "E3": "能量", "E4": "醫學"
+};
+function estimateDseLevel(pct01) {
+  const p = (pct01 == null || isNaN(pct01)) ? null : (pct01 > 1 ? pct01 / 100 : pct01);
+  if (p == null) return { level: "—", color: "bg-slate-100 text-slate-500 border-slate-200" };
+  const pct = p * 100;
+  if (pct >= 85) return { level: "5**", color: "bg-purple-100 text-purple-800 border-purple-300" };
+  if (pct >= 78) return { level: "5*", color: "bg-indigo-100 text-indigo-800 border-indigo-300" };
+  if (pct >= 67) return { level: "5", color: "bg-blue-100 text-blue-800 border-blue-300" };
+  if (pct >= 55) return { level: "4", color: "bg-sky-100 text-sky-800 border-sky-300" };
+  if (pct >= 40) return { level: "3", color: "bg-emerald-100 text-emerald-800 border-emerald-300" };
+  if (pct >= 30) return { level: "2", color: "bg-amber-100 text-amber-900 border-amber-300" };
+  if (pct >= 20) return { level: "1", color: "bg-orange-100 text-orange-800 border-orange-300" };
+  return { level: "U", color: "bg-rose-100 text-rose-800 border-rose-300" };
+}
+
+async function loadAllStudents() {
+  const snap = await db.collection("students").get();
+  const list = [];
+  snap.forEach(d => {
+    const data = d.data() || {};
+    if (data.active === false) return;
+    list.push({ ...data, id: d.id });
+  });
+  list.sort((a, b) => String(a.class || "").localeCompare(String(b.class || "")) || (Number(a.num) || 0) - (Number(b.num) || 0));
+  return list;
+}
+async function loadStudent(id) {
+  const snap = await db.collection("students").doc(id).get();
+  return snap.exists ? { ...snap.data(), id: snap.id } : null;
+}
+async function loadCollectionMaps(col) {
+  const snap = await db.collection(col).get();
+  const out = {};
+  snap.forEach(d => { out[d.id] = { ...d.data(), _id: d.id }; });
+  return out;
+}
+async function loadSubScores(sid, sub) {
+  const out = {};
+  try {
+    const snap = await db.collection("scores").doc(sid).collection(sub).get();
+    snap.forEach(d => {
+      let data = d.data() || {};
+      if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
+        data = { ...data.value, updatedAt: data.updatedAt };
       }
-      document.getElementById("sid").onchange = refreshPinUI;
-    }
+      out[d.id] = data;
+    });
+  } catch (e) { console.warn(e); }
+  return out;
+}
+function mapVisible(map, cohort) {
+  if (!map) return false;
+  if (!map.cohort || map.cohort === "" || map.cohort === "所有學生") return true;
+  if (!cohort) return true;
+  return map.cohort === cohort;
+}
+function scoreOfRec(map, rec) {
+  if (!map?.questions?.length || !rec) return null;
+  let earned = 0, max = 0, any = false;
+  map.questions.forEach(q => {
+    max += q.max || 0;
+    const raw = rec.scores ? rec.scores[q.id] : rec[q.id];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return;
+    any = true;
+    const sc = quizQuestionScore(q, raw);
+    earned += sc == null ? 0 : sc;
+  });
+  if (!any || max <= 0) return null;
+  return { earned, max, pct: earned / max };
+}
+function examWeighted(map, rec) {
+  if (!map?.questions?.length || !rec) return null;
+  let mcS = 0, mcM = 0, lqS = 0, lqM = 0, any = false;
+  map.questions.forEach(q => {
+    const max = q.max || 1;
+    if (q.type === "MC") mcM += max; else lqM += max;
+    const raw = rec[q.id];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return;
+    any = true;
+    const sc = quizQuestionScore(q, raw);
+    if (sc == null) return;
+    if (q.type === "MC") mcS += sc; else lqS += sc;
+  });
+  if (!any) return null;
+  const total = mcS + lqS, totalMax = mcM + lqM;
+  let w = totalMax > 0 ? (total / totalMax) * 100 : 0;
+  if (mcM > 0 && lqM > 0) w = ((mcS / mcM) * 0.35 + (lqS / lqM) * 0.65) * 100;
+  return { weighted: w, total, max: totalMax, pct: totalMax > 0 ? total / totalMax : 0 };
+}
+function accumulateDomains(maps, scoresTree, domainAcc) {
+  Object.keys(scoresTree || {}).forEach(pid => {
+    const map = maps[pid];
+    if (!map?.questions) return;
+    const rec = scoresTree[pid] || {};
+    const body = rec.scores && typeof rec.scores === "object" ? { ...rec, ...rec.scores } : rec;
+    map.questions.forEach(q => {
+      const tid = q.topicId;
+      const dk = domainFromTopicId(tid);
+      if (!dk || !domainAcc[dk]) return;
+      const raw = body[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      domainAcc[dk].max += q.max || 1;
+      domainAcc[dk].earned += sc;
+    });
+  });
+}
 
-    async function renderApp() {
-      var sid = sessionStorage.getItem(SS_STUDENT); if (!sid) return renderLogin();
-      var isAdmin = sessionStorage.getItem(SS_ADMIN)==="1";
-      var root = document.getElementById("root");
-      root.innerHTML = ""; root.appendChild(el("div",{className:"text-center py-20 text-slate-400"},["載入中…"]));
+/** ~100 稱號：由總體 + 最強領域 + 勤奮度組合 */
+function buildTitlePool() {
+  const domains = ["熱學", "力學", "波動", "電磁", "放射", "全能", "勤學", "補底", "實驗", "概念"];
+  const ranks = ["見習生", "學徒", "修行者", "能手", "達人", "高手", "專家", "宗師", "傳奇", "神話"];
+  const flavors = ["", "·破浪", "·夜讀", "·精準", "·穩陣", "·火花", "·冷靜", "·韌性", "·星火", "·無雙"];
+  const pool = [];
+  domains.forEach(d => {
+    ranks.forEach(r => {
+      pool.push(`${d}${r}`);
+    });
+  });
+  // extras to approach 100+
+  const extras = [
+    "午夜刷題人", "錯題回收專家", "公式獵人", "單位 capt 剋星", "圖像解讀王",
+    "長題馬拉松者", "MC 神射手", "LQ 拆解師", "實驗報告達人", "概念澄清者",
+    "持恆進步獎", "翻盤候選人", "穩健中游", "尖子候補", "物理詩人",
+    "能量守護者", "波動捕手", "電磁法師", "熱力煉金師", "放射觀測員"
+  ];
+  extras.forEach(e => pool.push(e));
+  flavors.forEach(f => {
+    if (!f) return;
+    pool.push("力學宗師" + f, "熱學宗師" + f, "全能王者" + f);
+  });
+  // unique
+  return Array.from(new Set(pool));
+}
+const TITLE_POOL = buildTitlePool();
+
+function pickTitle({ overallPct, domainPcts, hwDoneRate, ppCount }) {
+  const entries = Object.entries(domainPcts || {}).filter(([, v]) => v != null);
+  entries.sort((a, b) => b[1] - a[1]);
+  const topDom = entries[0] ? DOMAIN_LABELS[entries[0][0]] || "全能" : "勤學";
+  const pct = overallPct != null ? overallPct * 100 : 50;
+  let rankIdx = 0;
+  if (pct >= 90) rankIdx = 9;
+  else if (pct >= 85) rankIdx = 8;
+  else if (pct >= 78) rankIdx = 7;
+  else if (pct >= 70) rankIdx = 6;
+  else if (pct >= 62) rankIdx = 5;
+  else if (pct >= 55) rankIdx = 4;
+  else if (pct >= 48) rankIdx = 3;
+  else if (pct >= 40) rankIdx = 2;
+  else if (pct >= 30) rankIdx = 1;
+  else rankIdx = 0;
+  const ranks = ["見習生", "學徒", "修行者", "能手", "達人", "高手", "專家", "宗師", "傳奇", "神話"];
+  let title = `${topDom}${ranks[rankIdx]}`;
+  if (hwDoneRate != null && hwDoneRate >= 0.95 && pct < 70) title = "勤學修行者";
+  if (ppCount >= 300) title = "歷屆試題收藏家";
+  if (ppCount >= 150 && pct >= 70) title = `${topDom}宗師·破浪`;
+  if (pct >= 85 && entries[0] && entries[0][1] >= 0.9) title = `${topDom}神話`;
+  // deterministic pick from pool near title
+  const idx = Math.abs((title + String(Math.round(pct))).split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % TITLE_POOL.length;
+  // prefer constructed title if in pool else pool[idx]
+  if (TITLE_POOL.includes(title)) return title;
+  return TITLE_POOL[idx] || title;
+}
+
+// ---------- Login ----------
+function LoginView({ onLogin }) {
+  const [students, setStudents] = useState([]);
+  const [sid, setSid] = useState("");
+  const [pin, setPin] = useState("");
+  const [pin2, setPin2] = useState("");
+  const [mode, setMode] = useState("enter"); // enter | setup
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
       try {
-        var student = await loadStudent(sid);
-        if (!student) { sessionStorage.removeItem(SS_STUDENT); return renderLogin(); }
-        var quizzes = await loadSubScores(sid,"quizzes");
-        var exams = await loadSubScores(sid,"exams");
-        var homeworks = await loadSubScores(sid,"homeworks");
-        var pastpapers = await loadSubScores(sid,"pastpapers");
-        var quizTitles = await loadMapTitles("quizMaps");
-        var examTitles = await loadMapTitles("examMaps");
-        var hwTitles = await loadMapTitles("homeworkMaps");
-        var ppTitles = await loadMapTitles("pastpaperMaps");
-        root.innerHTML = "";
-        var header = el("header",{className:"bg-indigo-600 text-white px-4 py-5"},[
-          el("div",{className:"max-w-3xl mx-auto flex flex-wrap justify-between gap-3"},[
-            el("div",{},[
-              el("div",{className:"text-xs text-indigo-100"},[isAdmin?"Admin":"學生"]),
-              el("div",{className:"text-xl font-black"},[(student.name||"")+" ("+student.id+")"]),
-              el("div",{className:"text-sm text-indigo-100"},[(student.class||"")+" No."+(student.num!=null?student.num:"")])
-            ]),
-            el("button",{className:"text-xs bg-white/20 px-3 py-1.5 rounded-lg",onClick:function(){sessionStorage.clear();renderLogin();}},["登出"])
-          ])
-        ]);
-        var main = el("main",{className:"max-w-3xl mx-auto p-4 space-y-4"});
-        function section(title, scoresObj, titles) {
-          var ids = Object.keys(scoresObj||{}).sort();
-          var box = el("div",{className:"bg-white rounded-2xl border p-4"},[el("h2",{className:"font-bold mb-3"},[title])]);
-          if (!ids.length) { box.appendChild(el("p",{className:"text-sm text-slate-400"},["暫無紀錄"])); return box; }
-          var ul = el("div",{className:"space-y-2"});
-          ids.forEach(function(id){
-            var sum = summarizePaper(scoresObj[id]);
-            var st = scoresObj[id] && scoresObj[id].remakeStatus;
-            ul.appendChild(el("div",{className:"flex justify-between text-sm border rounded-xl px-3 py-2 bg-slate-50"},[
-              el("div",{},[el("div",{className:"font-semibold"},[titles[id]||id]), el("div",{className:"text-[11px] text-slate-400"},[id+(st?" · "+st:"")])]),
-              el("div",{className:"text-indigo-600 font-bold text-xs"},[sum.preview])
-            ]));
-          });
-          box.appendChild(ul); return box;
-        }
-        main.appendChild(section("功課", homeworks, hwTitles));
-        main.appendChild(section("小測", quizzes, quizTitles));
-        main.appendChild(section("大考", exams, examTitles));
-        main.appendChild(section("歷屆試題", pastpapers, ppTitles));
-        root.appendChild(header); root.appendChild(main);
-      } catch(e) {
-        root.innerHTML=""; root.appendChild(el("div",{className:"max-w-md mx-auto mt-20 bg-white border rounded-2xl p-6 text-center"},[
-          el("p",{className:"text-red-600 font-bold"},["Error"]), el("p",{className:"text-sm"},[e.message]),
-          el("button",{className:"text-indigo-600 font-bold mt-3",onClick:function(){sessionStorage.clear();renderLogin();}},["Back"])
-        ]));
-      }
+        const list = await loadAllStudents();
+        setStudents(list);
+        const saved = sessionStorage.getItem(SS_SID);
+        if (saved && list.some(s => s.id === saved)) setSid(saved);
+      } catch (e) { setErr(e.message); }
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!sid) return;
+    const s = students.find(x => x.id === sid);
+    setMode(s && hasPin(s) ? "enter" : "setup");
+    setPin(""); setPin2(""); setErr("");
+  }, [sid, students]);
+
+  const submit = async () => {
+    setErr("");
+    if (!sid) return setErr("請選擇學生");
+    const stu = students.find(s => s.id === sid) || await loadStudent(sid);
+    if (!stu) return setErr("找不到學生");
+    if (mode === "setup") {
+      if (!/^\d{4}$/.test(pin)) return setErr("PIN 須為 4 位數字");
+      if (pin !== pin2) return setErr("兩次 PIN 不一致");
+      await db.collection("students").doc(sid).set({ pin, updatedAt: new Date().toISOString() }, { merge: true });
+      sessionStorage.setItem(SS_SID, sid);
+      onLogin({ ...stu, pin });
+      return;
     }
-    if (sessionStorage.getItem(SS_STUDENT)) renderApp(); else renderLogin();
-  </script>
+    if (!hasPin(stu)) {
+      setMode("setup");
+      return;
+    }
+    if (String(pin) !== String(stu.pin)) return setErr("PIN 錯誤");
+    sessionStorage.setItem(SS_SID, sid);
+    onLogin(stu);
+  };
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center text-slate-400">載入中…</div>;
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-indigo-50 via-white to-sky-50">
+      <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border p-8 space-y-4">
+        <div className="text-center">
+          <div className="text-2xl font-black text-indigo-700">Physics 學生</div>
+          <p className="text-sm text-slate-500 mt-1">選擇自己 → {mode === "setup" ? "首次設定 PIN" : "輸入 PIN"}</p>
+        </div>
+        <label className="block text-xs font-bold text-slate-500">學生
+          <select className="mt-1 w-full border-2 rounded-xl px-3 py-2.5 text-sm font-semibold" value={sid} onChange={e => setSid(e.target.value)}>
+            <option value="">— 請選擇 —</option>
+            {students.map(s => <option key={s.id} value={s.id}>{labelStudent(s)}</option>)}
+          </select>
+        </label>
+        <label className="block text-xs font-bold text-slate-500">PIN（4 位數字）
+          <input type="password" inputMode="numeric" maxLength={4}
+            className="mt-1 w-full border-2 rounded-xl px-3 py-2.5 text-lg tracking-widest text-center font-bold"
+            value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+        </label>
+        {mode === "setup" && (
+          <label className="block text-xs font-bold text-slate-500">確認 PIN
+            <input type="password" inputMode="numeric" maxLength={4}
+              className="mt-1 w-full border-2 rounded-xl px-3 py-2.5 text-lg tracking-widest text-center font-bold"
+              value={pin2} onChange={e => setPin2(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+          </label>
+        )}
+        {err && <div className="text-sm text-rose-600 font-bold">{err}</div>}
+        <button className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-3 rounded-xl" onClick={submit}>
+          {mode === "setup" ? "設定並進入" : "進入"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Home Dashboard ----------
+function HomeDashboard({ student, maps, scores, cohortPeers, peerScores }) {
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
+
+  const cohort = student.cohort || "";
+  const hwMaps = useMemo(() => {
+    const out = {};
+    Object.entries(maps.homework || {}).forEach(([id, m]) => {
+      if (mapVisible(m, cohort)) out[id] = m;
+    });
+    return out;
+  }, [maps.homework, cohort]);
+
+  // Homework status
+  const hwStatus = useMemo(() => {
+    const items = [];
+    Object.keys(hwMaps).forEach(hid => {
+      const map = hwMaps[hid];
+      const rec = scores.homeworks?.[hid];
+      const status = rec?.remakeStatus || (!rec || !rec.scores || !Object.keys(rec.scores || {}).length ? "MISSING" : "PENDING");
+      const sc = scoreOfRec(map, rec || {});
+      items.push({
+        id: hid,
+        title: map.title || hid,
+        status,
+        scoreText: sc ? `${Math.round(sc.earned)}/${Math.round(sc.max)}` : null,
+        topics: (map.questions || []).slice(0, 4).map(q => q.topicDesc || q.topicId || q.id).filter(Boolean)
+      });
+    });
+    const missing = items.filter(x => x.status === "MISSING" || x.status === "ABSENT");
+    const pending = items.filter(x => x.status === "PENDING");
+    const done = items.filter(x => x.status === "DONE" || x.status === "PERFECT");
+    const perfect = items.filter(x => x.status === "PERFECT");
+    return { items, missing, pending, done, perfect, total: items.length };
+  }, [hwMaps, scores.homeworks]);
+
+  // PP stats
+  const ppStats = useMemo(() => {
+    let qCount = 0, hit = 0, total = 0;
+    const ppMaps = maps.pastpaper || {};
+    Object.keys(scores.pastpapers || {}).forEach(pid => {
+      const map = ppMaps[pid];
+      const rec = scores.pastpapers[pid] || {};
+      if (!map?.questions) {
+        Object.keys(rec).forEach(k => {
+          if (["updatedAt", "_id", "value", "_submitMonth"].includes(k)) return;
+          if (rec[k] !== "" && rec[k] != null) qCount++;
+        });
+        return;
+      }
+      map.questions.forEach(q => {
+        const raw = rec[q.id];
+        if (raw === undefined || raw === null || String(raw).trim() === "") return;
+        qCount++;
+        total += q.max || 1;
+        const sc = quizQuestionScore(q, raw);
+        hit += sc == null ? 0 : sc;
+      });
+    });
+    return { qCount, hitRate: total > 0 ? hit / total : null };
+  }, [scores.pastpapers, maps.pastpaper]);
+
+  const showPP = !isJuniorClass(student) || ppStats.qCount > 0;
+
+  // Combined performance
+  const performance = useMemo(() => {
+    const hwPcts = [];
+    Object.keys(hwMaps).forEach(hid => {
+      const sc = scoreOfRec(hwMaps[hid], scores.homeworks?.[hid]);
+      if (sc) hwPcts.push(sc.pct);
+    });
+    const quizPcts = [];
+    Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const sc = scoreOfRec(m, scores.quizzes?.[id]);
+      if (sc) quizPcts.push(sc.pct);
+    });
+    const examWs = [];
+    Object.entries(maps.exam || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const st = examWeighted(m, scores.exams?.[id]);
+      if (st) examWs.push(st.weighted / 100);
+    });
+    const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+    const hw = avg(hwPcts), quiz = avg(quizPcts), exam = avg(examWs), pp = ppStats.hitRate;
+    // weights: exam 50, quiz 30, hw 20 (redistribute if missing)
+    let parts = [];
+    if (hw != null) parts.push({ w: 20, v: hw });
+    if (quiz != null) parts.push({ w: 30, v: quiz });
+    if (exam != null) parts.push({ w: 50, v: exam });
+    if (!parts.length && pp != null) parts.push({ w: 100, v: pp });
+    const sumW = parts.reduce((a, p) => a + p.w, 0);
+    const overall = sumW ? parts.reduce((a, p) => a + p.v * (p.w / sumW), 0) : null;
+    // exam + pp for DSE estimate
+    let dseParts = [];
+    if (exam != null) dseParts.push(exam);
+    if (pp != null) dseParts.push(pp);
+    const dsePct = dseParts.length ? dseParts.reduce((a, b) => a + b, 0) / dseParts.length : (overall);
+    return { hw, quiz, exam, pp, overall, dsePct, grade: estimateDseLevel(dsePct) };
+  }, [hwMaps, maps, scores, cohort, ppStats]);
+
+  // Domains from all sources
+  const domainPcts = useMemo(() => {
+    const acc = {};
+    Object.keys(DOMAIN_LABELS).forEach(k => { acc[k] = { earned: 0, max: 0 }; });
+    accumulateDomains(hwMaps, scores.homeworks, acc);
+    const qMaps = {};
+    Object.entries(maps.quiz || {}).forEach(([id, m]) => { if (mapVisible(m, cohort)) qMaps[id] = m; });
+    accumulateDomains(qMaps, scores.quizzes, acc);
+    const eMaps = {};
+    Object.entries(maps.exam || {}).forEach(([id, m]) => { if (mapVisible(m, cohort)) eMaps[id] = m; });
+    accumulateDomains(eMaps, scores.exams, acc);
+    accumulateDomains(maps.pastpaper || {}, scores.pastpapers, acc);
+    const pcts = {};
+    Object.keys(acc).forEach(k => {
+      pcts[k] = acc[k].max > 0 ? acc[k].earned / acc[k].max : null;
+    });
+    return pcts;
+  }, [hwMaps, maps, scores, cohort]);
+
+  const title = useMemo(() => pickTitle({
+    overallPct: performance.overall,
+    domainPcts,
+    hwDoneRate: hwStatus.total ? hwStatus.done.length / hwStatus.total : null,
+    ppCount: ppStats.qCount
+  }), [performance, domainPcts, hwStatus, ppStats]);
+
+  // Ranking among cohort peers
+  const ranking = useMemo(() => {
+    if (!cohortPeers?.length || !peerScores) return null;
+    const rows = cohortPeers.map(s => {
+      const ps = peerScores[s.id];
+      if (!ps) return { id: s.id, pct: null };
+      return { id: s.id, pct: ps.overall };
+    }).filter(r => r.pct != null).sort((a, b) => b.pct - a.pct);
+    const idx = rows.findIndex(r => r.id === student.id);
+    if (idx < 0) return null;
+    const rank = idx + 1;
+    const n = rows.length;
+    const percentile = n > 1 ? 1 - idx / (n - 1) : 1; // 1 = top
+    const bottom25 = rank > Math.ceil(n * 0.75);
+    return { rank, n, pct: rows[idx].pct, bottom25, percentile };
+  }, [cohortPeers, peerScores, student.id]);
+
+  useEffect(() => {
+    if (!chartRef.current || typeof Chart === "undefined") return;
+    const labels = [];
+    const data = [];
+    ["1", "2", "3", "4", "5"].forEach(k => {
+      if (domainPcts[k] != null) {
+        labels.push(DOMAIN_LABELS[k]);
+        data.push(Math.round(domainPcts[k] * 100));
+      }
+    });
+    // include E3/E4 if data
+    ["E3", "E4"].forEach(k => {
+      if (domainPcts[k] != null) {
+        labels.push(DOMAIN_LABELS[k]);
+        data.push(Math.round(domainPcts[k] * 100));
+      }
+    });
+    if (chartInstance.current) chartInstance.current.destroy();
+    if (!labels.length) return;
+    chartInstance.current = new Chart(chartRef.current.getContext("2d"), {
+      type: "radar",
+      data: {
+        labels,
+        datasets: [{
+          label: "能力值 %",
+          data,
+          backgroundColor: "rgba(56, 189, 248, 0.25)",
+          borderColor: "rgba(14, 165, 233, 0.9)",
+          pointBackgroundColor: "rgba(14, 165, 233, 1)",
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          r: {
+            min: 0, max: 100,
+            ticks: { display: false, stepSize: 20 },
+            pointLabels: { font: { size: 12, weight: "bold" }, color: "#334155" }
+          }
+        },
+        plugins: { legend: { display: false } }
+      }
+    });
+    return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+  }, [domainPcts]);
+
+  const firstName = student.name || "同學";
+
+  return (
+    <div className="space-y-5">
+      {/* Hero */}
+      <div className="rounded-3xl bg-gradient-to-br from-indigo-600 via-blue-600 to-sky-500 text-white p-6 md:p-8 shadow-lg relative overflow-hidden">
+        <div className="relative z-10">
+          <h1 className="text-2xl md:text-3xl font-black">準備好超越自己了嗎 · {firstName}？</h1>
+          <p className="mt-2 text-indigo-100 text-sm md:text-base">
+            保持紀律，今天的練習就是明天的 5**。你目前的稱號是
+            <span className="text-amber-300 font-black">「{title}」</span>。
+          </p>
+          <div className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-3">
+            {/* Ranking + DSE */}
+            <div className="rounded-2xl bg-white/15 border border-white/25 backdrop-blur px-4 py-3">
+              <div className="text-xs text-indigo-100 font-bold">綜合表現</div>
+              {ranking && !ranking.bottom25 ? (
+                <div className="text-3xl font-black mt-1">#{ranking.rank}</div>
+              ) : ranking ? (
+                <div className="text-3xl font-black mt-1">{Math.round((ranking.pct || 0) * 100)}%</div>
+              ) : performance.overall != null ? (
+                <div className="text-3xl font-black mt-1">{Math.round(performance.overall * 100)}%</div>
+              ) : (
+                <div className="text-xl font-bold mt-1 text-indigo-100">—</div>
+              )}
+              <div className="text-[11px] text-indigo-100 mt-0.5">
+                {ranking && !ranking.bottom25
+                  ? `全組 ${ranking.n} 人 · ${Math.round((ranking.pct || 0) * 100)}%`
+                  : ranking
+                    ? "繼續加油（排名暫隱藏）"
+                    : "綜合得分率"}
+              </div>
+              <div className="mt-2 pt-2 border-t border-white/20 flex items-center gap-2">
+                <span className="text-[11px] text-indigo-100">大考預估</span>
+                <span className={`text-sm font-black px-2 py-0.5 rounded-lg border ${performance.grade.color}`}>
+                  {performance.grade.level}
+                </span>
+              </div>
+            </div>
+
+            {showPP && (
+              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-3">
+                <div className="text-xs text-indigo-100 font-bold">Pastpaper 題數</div>
+                <div className="text-3xl font-black mt-1">{ppStats.qCount}</div>
+                <div className="text-[11px] text-indigo-100">已練習題目</div>
+              </div>
+            )}
+            {showPP && (
+              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-3">
+                <div className="text-xs text-indigo-100 font-bold">PP 命中率</div>
+                <div className="text-3xl font-black mt-1">
+                  {ppStats.hitRate != null ? Math.round(ppStats.hitRate * 100) + "%" : "—"}
+                </div>
+                <div className="text-[11px] text-indigo-100">歷屆得分率</div>
+              </div>
+            )}
+            <div className={`rounded-2xl bg-white/10 border border-white/20 px-4 py-3 ${!showPP ? "md:col-span-2" : ""}`}>
+              <div className="text-xs text-indigo-100 font-bold">稱號</div>
+              <div className="text-xl font-black mt-1 text-amber-200 leading-snug">{title}</div>
+              <div className="text-[11px] text-indigo-100 mt-1">功課·小測·考試·Pastpaper</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Radar */}
+      <div className="bg-white rounded-3xl border p-5 shadow-sm">
+        <div className="font-bold text-slate-700 flex items-center gap-2">
+          <span className="text-sky-500">📈</span> 我的領域能力值
+          <span className="text-xs font-normal text-slate-400">（功課 + 小測 + 考試 + Pastpaper）</span>
+        </div>
+        <div className="h-72 mt-2"><canvas ref={chartRef} /></div>
+      </div>
+
+      {/* Homework + cards */}
+      <div className="grid lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-1 bg-white rounded-3xl border p-5 shadow-sm space-y-3">
+          <div className="flex items-center gap-2 font-bold text-slate-800">
+            <span className="w-9 h-9 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center text-lg">📘</span>
+            日常功課狀態
+          </div>
+          <div className="text-3xl font-black text-indigo-700">
+            {hwStatus.done.length}<span className="text-lg text-slate-400 font-bold"> / {hwStatus.total} 份已改正</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {!!hwStatus.missing.length && (
+              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 border">未交 {hwStatus.missing.length}</span>
+            )}
+            {!!hwStatus.pending.length && (
+              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200">待改正 {hwStatus.pending.length}</span>
+            )}
+            {!!hwStatus.perfect.length && (
+              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">完美 {hwStatus.perfect.length}</span>
+            )}
+          </div>
+          <div className="divide-y max-h-80 overflow-auto">
+            {[...hwStatus.missing, ...hwStatus.pending, ...hwStatus.done].map(item => {
+              const stLabel = item.status === "MISSING" ? "未交" :
+                item.status === "PENDING" ? "未改正" :
+                item.status === "PERFECT" ? "完美" :
+                item.status === "DONE" ? "已改正" :
+                item.status === "EXEMPT" ? "豁免" : item.status;
+              const stCls = item.status === "MISSING" ? "text-slate-600" :
+                item.status === "PENDING" ? "text-amber-700" :
+                item.status === "PERFECT" ? "text-emerald-600" : "text-blue-600";
+              return (
+                <div key={item.id} className="py-2.5">
+                  <div className="flex justify-between gap-2 items-start">
+                    <div className="font-bold text-sm text-slate-800">{item.title}</div>
+                    <div className={`text-xs font-black shrink-0 ${stCls}`}>
+                      {stLabel}{item.scoreText ? ` (${item.scoreText})` : ""}
+                    </div>
+                  </div>
+                  {!!item.topics.length && (
+                    <div className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">
+                      內容：{item.topics.join("、")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {!hwStatus.total && <p className="text-sm text-slate-400 py-4">暫時沒有此群組的功課</p>}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-3xl border p-5 shadow-sm">
+          <div className="text-sm font-bold text-slate-500 mb-2">課堂小測</div>
+          {performance.quiz != null ? (
+            <>
+              <div className="text-3xl font-black text-slate-800">{Math.round(performance.quiz * 100)}%</div>
+              <div className="text-xs text-slate-400 mt-1">平均得分率</div>
+            </>
+          ) : (
+            <div className="text-slate-400 text-sm py-6">尚無小測成績</div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-3xl border p-5 shadow-sm">
+          <div className="text-sm font-bold text-slate-500 mb-2">考試表現</div>
+          {performance.exam != null ? (
+            <>
+              <div className="text-3xl font-black text-slate-800">{Math.round(performance.exam * 100)}</div>
+              <div className="text-xs text-slate-400 mt-1">平均加權 / 100</div>
+              <div className={`inline-block mt-2 text-sm font-black px-2 py-1 rounded-lg border ${performance.grade.color}`}>
+                預估 {performance.grade.level}
+              </div>
+            </>
+          ) : (
+            <div className="text-slate-400 text-sm py-6">尚無考試成績</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StudentShell({ student, onLogout }) {
+  const [tab, setTab] = useState("home");
+  const [loading, setLoading] = useState(true);
+  const [maps, setMaps] = useState({ homework: {}, quiz: {}, exam: {}, pastpaper: {} });
+  const [scores, setScores] = useState({ homeworks: {}, quizzes: {}, exams: {}, pastpapers: {} });
+  const [cohortPeers, setCohortPeers] = useState([]);
+  const [peerScores, setPeerScores] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const [hw, quiz, exam, pp] = await Promise.all([
+          loadCollectionMaps("homeworkMaps"),
+          loadCollectionMaps("quizMaps"),
+          loadCollectionMaps("examMaps"),
+          loadCollectionMaps("pastpaperMaps")
+        ]);
+        const [hws, qzs, exs, pps] = await Promise.all([
+          loadSubScores(student.id, "homeworks"),
+          loadSubScores(student.id, "quizzes"),
+          loadSubScores(student.id, "exams"),
+          loadSubScores(student.id, "pastpapers")
+        ]);
+        if (cancelled) return;
+        setMaps({ homework: hw, quiz, exam, pastpaper: pp });
+        setScores({ homeworks: hws, quizzes: qzs, exams: exs, pastpapers: pps });
+
+        // cohort peers for ranking (lightweight overall)
+        const all = await loadAllStudents();
+        const peers = all.filter(s => s.cohort && s.cohort === student.cohort);
+        setCohortPeers(peers);
+        // compute peer overall in background chunks
+        const peerOut = {};
+        const chunk = 8;
+        for (let i = 0; i < peers.length; i += chunk) {
+          const slice = peers.slice(i, i + chunk);
+          await Promise.all(slice.map(async s => {
+            try {
+              const [sh, sq, se] = await Promise.all([
+                loadSubScores(s.id, "homeworks"),
+                loadSubScores(s.id, "quizzes"),
+                loadSubScores(s.id, "exams")
+              ]);
+              const hwPcts = [], quizPcts = [], examWs = [];
+              Object.entries(hw).forEach(([id, m]) => {
+                if (!mapVisible(m, s.cohort)) return;
+                const sc = scoreOfRec(m, sh[id]);
+                if (sc) hwPcts.push(sc.pct);
+              });
+              Object.entries(quiz).forEach(([id, m]) => {
+                if (!mapVisible(m, s.cohort)) return;
+                const sc = scoreOfRec(m, sq[id]);
+                if (sc) quizPcts.push(sc.pct);
+              });
+              Object.entries(exam).forEach(([id, m]) => {
+                if (!mapVisible(m, s.cohort)) return;
+                const st = examWeighted(m, se[id]);
+                if (st) examWs.push(st.weighted / 100);
+              });
+              const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+              const parts = [];
+              const h = avg(hwPcts), q = avg(quizPcts), e = avg(examWs);
+              if (h != null) parts.push({ w: 20, v: h });
+              if (q != null) parts.push({ w: 30, v: q });
+              if (e != null) parts.push({ w: 50, v: e });
+              const sumW = parts.reduce((a, p) => a + p.w, 0);
+              peerOut[s.id] = { overall: sumW ? parts.reduce((a, p) => a + p.v * (p.w / sumW), 0) : null };
+            } catch (err) { console.warn(err); }
+          }));
+        }
+        if (!cancelled) setPeerScores(peerOut);
+      } catch (e) { alert(e.message); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [student.id]);
+
+  const tabs = [
+    { id: "home", label: "總覽" },
+    { id: "school", label: "校內進度" },
+    { id: "pp", label: "歷屆試題" },
+    { id: "ai", label: "AI 補底" },
+    { id: "rank", label: "英雄榜" }
+  ];
+
+  return (
+    <div className="min-h-screen bg-slate-100">
+      <header className="bg-gradient-to-r from-indigo-800 to-blue-700 text-white">
+        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-full bg-white/20 flex items-center justify-center font-black text-lg">
+              {(student.name || "?").charAt(0)}
+            </div>
+            <div>
+              <div className="font-black text-lg leading-tight">{student.name}</div>
+              <div className="text-xs text-indigo-200">{student.cohort || ""} · {student.class}-{student.num}</div>
+            </div>
+          </div>
+          <button className="text-sm font-bold text-indigo-100 hover:text-white" onClick={onLogout}>登出</button>
+        </div>
+        <div className="max-w-5xl mx-auto px-4 flex gap-1 overflow-x-auto pb-0">
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className={`px-4 py-2.5 text-sm font-bold rounded-t-xl whitespace-nowrap ${tab === t.id ? "bg-slate-100 text-indigo-800" : "text-indigo-100 hover:bg-white/10"}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </header>
+      <main className="max-w-5xl mx-auto px-4 py-6">
+        {loading && <div className="text-center text-slate-400 py-16">載入你的數據…</div>}
+        {!loading && tab === "home" && (
+          <HomeDashboard student={student} maps={maps} scores={scores} cohortPeers={cohortPeers} peerScores={peerScores} />
+        )}
+        {!loading && tab !== "home" && (
+          <div className="bg-white rounded-3xl border p-12 text-center text-slate-400">
+            <div className="text-lg font-bold text-slate-600 mb-2">{tabs.find(x => x.id === tab)?.label}</div>
+            下一批會接上此分頁（校內進度 / 歷屆試題 / AI 補底 / 英雄榜）
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function App() {
+  const [student, setStudent] = useState(null);
+  const [booting, setBooting] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const sid = sessionStorage.getItem(SS_SID);
+      if (sid) {
+        try {
+          const s = await loadStudent(sid);
+          if (s && hasPin(s)) setStudent(s);
+          else sessionStorage.removeItem(SS_SID);
+        } catch (e) {}
+      }
+      setBooting(false);
+    })();
+  }, []);
+
+  if (booting) return <div className="min-h-screen flex items-center justify-center text-slate-400">啟動中…</div>;
+  if (!student) return <LoginView onLogin={setStudent} />;
+  return (
+    <StudentShell
+      student={student}
+      onLogout={() => {
+        sessionStorage.removeItem(SS_SID);
+        setStudent(null);
+      }}
+    />
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
 </body>
 </html>
