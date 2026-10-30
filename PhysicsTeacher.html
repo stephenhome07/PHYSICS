@@ -6143,6 +6143,30 @@ function ContinuousAssessView({ students, homeworkMaps, examMaps, currentCohort 
   const [rows, setRows] = useState([]); // {id,class,num,name,ut,hw,cp,total}
   const [loading, setLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState("");
+  const [sheetName, setSheetName] = useState("");
+  const [savedList, setSavedList] = useState([]); // [{id, name, cohort, updatedAt, n}]
+  const [loadPick, setLoadPick] = useState("");
+
+  const refreshSavedList = async () => {
+    try {
+      const snap = await db.collection("continuousAssess").get();
+      const list = [];
+      snap.forEach(d => {
+        const data = d.data() || {};
+        list.push({
+          id: d.id,
+          name: data.name || d.id,
+          cohort: data.cohort || "",
+          updatedAt: data.updatedAt || "",
+          n: Array.isArray(data.rows) ? data.rows.length : 0
+        });
+      });
+      list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+      setSavedList(list);
+    } catch (e) { console.warn(e); }
+  };
+
+  useEffect(() => { refreshSavedList(); }, []);
 
   const cohortStudents = useMemo(() => {
     return students.filter(s => s.active !== false && (!cohort || s.cohort === cohort))
@@ -6296,20 +6320,85 @@ function ContinuousAssessView({ students, homeworkMaps, examMaps, currentCohort 
 
   const saveSheet = async () => {
     if (!rows.length) return alert("請先計算");
+    const name = (sheetName || "").trim();
+    if (!name) return alert("請輸入底稿名稱，例如 2627T1A1");
+    // doc id：只用安全字元
+    const key = name.replace(/[\/\s]+/g, "_").replace(/[^\w\u4e00-\u9fff\-_.]/g, "");
+    if (!key) return alert("名稱無效");
     setSaveStatus("儲存中…");
     try {
-      const key = (cohort || "all").replace(/\//g, "_");
+      // 還原完整列（含班號姓名）方便直接載入核對
+      const fullRows = rows.map(r => ({
+        id: r.id, class: r.class, num: r.num, name: r.name,
+        ut: r.ut, hw: r.hw, cp: r.cp, total: r.total,
+        utPct: r.utPct, hwPct: r.hwPct
+      }));
       await db.collection("continuousAssess").doc(key).set({
+        name,
         cohort: cohort || "",
         weights: { ut: wUT, hw: wHW, cp: wCP },
         utExamId,
         hwIds: hwIds.filter(id => hwSel[id]),
-        rows: rows.map(r => ({ id: r.id, ut: r.ut, hw: r.hw, cp: r.cp, total: r.total })),
+        rows: fullRows,
         updatedAt: new Date().toISOString()
       }, { merge: true });
-      setSaveStatus("已儲存底稿");
-      setTimeout(() => setSaveStatus(""), 2000);
+      setSheetName(name);
+      setSaveStatus("已儲存：「" + name + "」");
+      await refreshSavedList();
+      setTimeout(() => setSaveStatus(""), 2500);
     } catch (e) { setSaveStatus(""); alert(e.message); }
+  };
+
+  const loadSheet = async (docId) => {
+    if (!docId) return alert("請選擇一份底稿");
+    setSaveStatus("載入中…");
+    try {
+      const snap = await db.collection("continuousAssess").doc(docId).get();
+      if (!snap.exists) return alert("找不到底稿");
+      const data = snap.data() || {};
+      setSheetName(data.name || docId);
+      if (data.cohort) setCohort(data.cohort);
+      if (data.weights) {
+        if (data.weights.ut != null) setWUT(data.weights.ut);
+        if (data.weights.hw != null) setWHW(data.weights.hw);
+        if (data.weights.cp != null) setWCP(data.weights.cp);
+      }
+      if (data.utExamId) setUtExamId(data.utExamId);
+      if (Array.isArray(data.hwIds)) {
+        const sel = {};
+        hwIds.forEach(id => { sel[id] = data.hwIds.includes(id); });
+        // 保留已存但目前列表沒有的 id
+        data.hwIds.forEach(id => { sel[id] = true; });
+        setHwSel(sel);
+      }
+      const loaded = (data.rows || []).map(r => {
+        // 補班名：若舊底稿只有 id
+        const stu = students.find(s => s.id === r.id);
+        return {
+          id: r.id,
+          class: r.class != null ? r.class : (stu?.class || ""),
+          num: r.num != null ? r.num : (stu?.num ?? ""),
+          name: r.name || stu?.name || r.id,
+          ut: r.ut, hw: r.hw, cp: r.cp, total: r.total,
+          utPct: r.utPct, hwPct: r.hwPct
+        };
+      });
+      setRows(loaded);
+      setLoadPick(docId);
+      setSaveStatus("已載入：「" + (data.name || docId) + "」");
+      setTimeout(() => setSaveStatus(""), 2500);
+    } catch (e) { setSaveStatus(""); alert(e.message); }
+  };
+
+  const deleteSheet = async (docId) => {
+    if (!docId) return;
+    if (!confirm("刪除底稿「" + docId + "」？")) return;
+    try {
+      await db.collection("continuousAssess").doc(docId).delete();
+      if (loadPick === docId) setLoadPick("");
+      await refreshSavedList();
+      alert("已刪除");
+    } catch (e) { alert(e.message); }
   };
 
   const exportCsv = () => {
@@ -6322,7 +6411,7 @@ function ContinuousAssessView({ students, homeworkMaps, examMaps, currentCohort 
     const blob = new Blob(["\uFEFF"+csv], { type: "text/csv;charset=utf-8;" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `平時分_${cohort||"all"}.csv`;
+    a.download = `平時分_${(sheetName||cohort||"all").replace(/\\s+/g,"_")}.csv`;
     a.click();
   };
 
@@ -6368,13 +6457,38 @@ function ContinuousAssessView({ students, homeworkMaps, examMaps, currentCohort 
             {!hwIds.length && <span className="text-slate-400 text-sm">此群組無功課藍圖</span>}
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button disabled={loading} className="bg-emerald-600 text-white font-bold px-5 py-2 rounded-xl text-sm disabled:opacity-50" onClick={compute}>
-            {loading ? "計算中…" : "計算／預填課堂分"}
-          </button>
-          <button className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-sm" onClick={saveSheet}>儲存底稿</button>
-          <button className="border-2 font-bold px-4 py-2 rounded-xl text-sm" onClick={exportCsv}>匯出 CSV</button>
-          {saveStatus && <span className="text-sm text-slate-500 self-center">{saveStatus}</span>}
+        <div className="grid sm:grid-cols-2 gap-3 items-end">
+          <label className="text-xs font-bold">底稿名稱（儲存／覆蓋用）
+            <input className="mt-1 w-full border-2 border-indigo-200 rounded-lg px-3 py-2 text-sm font-bold mono"
+              placeholder="例如 2627T1A1" value={sheetName} onChange={e=>setSheetName(e.target.value)} />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button disabled={loading} className="bg-emerald-600 text-white font-bold px-5 py-2 rounded-xl text-sm disabled:opacity-50" onClick={compute}>
+              {loading ? "計算中…" : "計算／預填課堂分"}
+            </button>
+            <button className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-sm" onClick={saveSheet}>儲存底稿</button>
+            <button className="border-2 font-bold px-4 py-2 rounded-xl text-sm" onClick={exportCsv}>匯出 CSV</button>
+          </div>
+        </div>
+        {saveStatus && <div className="text-sm font-semibold text-slate-600">{saveStatus}</div>}
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+          <div className="text-xs font-bold text-slate-700">已存底稿（點選載入核對）</div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <select className="border rounded-lg px-2 py-1.5 text-sm font-semibold min-w-[200px]" value={loadPick}
+              onChange={e => setLoadPick(e.target.value)}>
+              <option value="">— 選擇底稿 —</option>
+              {savedList.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.name}{s.cohort ? " · "+s.cohort : ""}（{s.n}人）{s.updatedAt ? " · "+String(s.updatedAt).slice(0,16).replace("T"," ") : ""}
+                </option>
+              ))}
+            </select>
+            <button className="bg-slate-800 text-white font-bold text-sm px-3 py-1.5 rounded-lg" onClick={() => loadSheet(loadPick)}>載入</button>
+            <button className="text-rose-600 font-bold text-sm px-2" onClick={() => deleteSheet(loadPick)}>刪除底稿</button>
+            <button className="text-indigo-600 font-bold text-sm px-2" onClick={refreshSavedList}>重新整理列表</button>
+          </div>
+          {!savedList.length && <p className="text-xs text-slate-400">尚未有底稿。計算後輸入名稱再按「儲存底稿」。</p>}
         </div>
       </div>
 
