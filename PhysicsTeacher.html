@@ -489,6 +489,48 @@ async function deleteHomeworkScore(studentId, hwId) {
   await db.collection("scores").doc(studentId).collection("homeworks").doc(String(hwId)).delete();
 }
 
+async function deleteStudentCompletely(sid) {
+  for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
+    const snap = await db.collection("scores").doc(sid).collection(sub).get();
+    for (const doc of snap.docs) await doc.ref.delete();
+  }
+  try { await db.collection("scores").doc(sid).delete(); } catch (e) {}
+  await db.collection("students").doc(sid).delete();
+}
+
+async function clearCollectionDocs(colName) {
+  const snap = await db.collection(colName).get();
+  let batch = db.batch(), ops = 0;
+  const commit = async () => { if (!ops) return; await batch.commit(); batch = db.batch(); ops = 0; };
+  for (const d of snap.docs) {
+    batch.delete(d.ref);
+    ops++;
+    if (ops >= 400) await commit();
+  }
+  await commit();
+  return snap.size;
+}
+
+async function clearAllFirestoreData(logm) {
+  const cols = ["students", "homeworkMaps", "quizMaps", "examMaps", "pastpaperMaps", "quizMakeup", "examMakeup", "syllabus", "meta", "continuousAssess"];
+  for (const c of cols) {
+    logm("清除 " + c + "…");
+    const n = await clearCollectionDocs(c);
+    logm("✓ " + c + " (" + n + ")");
+  }
+  // scores: each student doc + subcollections already deleted with students; residual scores roots
+  logm("清除 scores…");
+  const scoreRoots = await db.collection("scores").get();
+  for (const root of scoreRoots.docs) {
+    for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
+      const snap = await root.ref.collection(sub).get();
+      for (const d of snap.docs) await d.ref.delete();
+    }
+    await root.ref.delete();
+  }
+  logm("✓ scores");
+}
+
 async function migrateStudentId(oldId, newId, studentPatch) {
   const oldRef = db.collection("students").doc(oldId);
   const newRef = db.collection("students").doc(newId);
@@ -559,6 +601,7 @@ function Sidebar({ view, setView }) {
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">資料</div>
         <Item id="students" label="學生名單管理" />
+        <Item id="caExport" label="平時分輸出" />
         <Item id="import" label="匯入 Sheet / 概況" />
         <Item id="idMap" label="學生 ID 對照補齊" />
         <Item id="pins" label="學生與 PIN" />
@@ -644,6 +687,22 @@ function ImportView({ onReload }) {
     if (onReload) onReload();
   };
 
+  const clearAll = async () => {
+    if (!confirm("⚠️ 將刪除 Firestore 內幾乎所有資料（學生、藍圖、成績、補測等）。此操作無法復原！")) return;
+    if (!confirm("最後確認：真的要一鍵清空全部資料？")) return;
+    setLog("");
+    const logm = (m) => setLog(p => p + m + "\n");
+    try {
+      await clearAllFirestoreData(logm);
+      logm("✅ 已清空");
+      alert("已清空雲端資料");
+      if (onReload) onReload();
+    } catch (e) {
+      logm("❌ " + e.message);
+      alert(e.message);
+    }
+  };
+
   return (
     <div className="space-y-4 max-w-4xl">
       <div className="bg-white rounded-2xl border p-5">
@@ -651,6 +710,11 @@ function ImportView({ onReload }) {
         {stats?.error ? <p className="text-red-600 text-sm">{stats.error}</p> :
           <p className="text-sm text-slate-600">學生 <b>{stats?.students ?? "…"}</b>　功課藍圖 <b>{stats?.hw ?? "…"}</b><br/>
           <span className="text-xs text-slate-400">上次匯入：{stats?.last || "尚未"}</span></p>}
+        <div className="mt-4 p-3 rounded-xl border border-rose-200 bg-rose-50">
+          <div className="font-bold text-rose-800 text-sm mb-1">危險操作（測試用）</div>
+          <p className="text-xs text-rose-700 mb-2">一鍵清除學生、所有藍圖、成績、補測／補考記錄等。正式數據請勿使用。</p>
+          <button className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-sm px-4 py-2 rounded-lg" onClick={clearAll}>一鍵清空全部資料</button>
+        </div>
       </div>
       <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-sm text-amber-900">
         <b>取得 JSON：</b>不要在編輯器 Run。請開 Apps Script 的 <b>/exec</b> 網址，全選複製。試驗期可分次匯入，正式前再全量一次。
@@ -5958,6 +6022,18 @@ function StudentsManageView({ students, onReload }) {
     setBusy(false);
   };
 
+  const removeStudent = async (sid, name) => {
+    if (!confirm("確定徹底刪除「" + name + "」（" + sid + "）？\n會刪除該生所有成績，無法復原。")) return;
+    if (!confirm("再確認一次：刪除後無法還原。")) return;
+    setBusy(true);
+    try {
+      await deleteStudentCompletely(sid);
+      if (onReload) await onReload();
+      alert("已刪除 " + sid);
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap justify-between gap-3 items-center">
@@ -6041,11 +6117,294 @@ function StudentsManageView({ students, onReload }) {
                   {s.active===false
                     ? <button className="text-emerald-600 font-bold text-xs" onClick={()=>setActive(s.id,true)}>啟用</button>
                     : <button className="text-amber-600 font-bold text-xs" onClick={()=>setActive(s.id,false)}>停用</button>}
+                  <button className="text-rose-600 font-bold text-xs" onClick={()=>removeStudent(s.id, s.name)}>刪除</button>
                 </td>
               </tr>
             ))}
             {!filtered.length && (
               <tr><td colSpan={7} className="p-8 text-center text-slate-400">沒有符合條件的學生</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
+function ContinuousAssessView({ students, homeworkMaps, examMaps, currentCohort }) {
+  const cohorts = useMemo(() => Array.from(new Set(students.map(s => s.cohort).filter(Boolean))).sort(), [students]);
+  const [cohort, setCohort] = useState(currentCohort && currentCohort !== "所有學生" ? currentCohort : (cohorts[0] || ""));
+  const [wUT, setWUT] = useState(50);
+  const [wHW, setWHW] = useState(30);
+  const [wCP, setWCP] = useState(20);
+  const [utExamId, setUtExamId] = useState("");
+  const [hwSel, setHwSel] = useState({});
+  const [rows, setRows] = useState([]); // {id,class,num,name,ut,hw,cp,total}
+  const [loading, setLoading] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("");
+
+  const cohortStudents = useMemo(() => {
+    return students.filter(s => s.active !== false && (!cohort || s.cohort === cohort))
+      .sort((a,b) => String(a.class).localeCompare(String(b.class)) || (Number(a.num)||0)-(Number(b.num)||0));
+  }, [students, cohort]);
+
+  const examIds = useMemo(() => Object.keys(examMaps || {}).filter(id => {
+    const m = examMaps[id];
+    if (!m) return false;
+    if (!m.cohort || m.cohort === "" || m.cohort === "所有學生") return true;
+    return m.cohort === cohort;
+  }).sort(), [examMaps, cohort]);
+
+  const hwIds = useMemo(() => Object.keys(homeworkMaps || {}).filter(id => {
+    const m = homeworkMaps[id];
+    if (!m) return false;
+    if (!m.cohort || m.cohort === "" || m.cohort === "所有學生") return true;
+    return m.cohort === cohort;
+  }).sort(), [homeworkMaps, cohort]);
+
+  useEffect(() => {
+    if (examIds.length && !examIds.includes(utExamId)) setUtExamId(examIds[0] || "");
+  }, [examIds]);
+
+  useEffect(() => {
+    setHwSel(prev => {
+      const next = {};
+      hwIds.forEach(id => { next[id] = prev[id] !== undefined ? prev[id] : true; });
+      return next;
+    });
+  }, [hwIds.join("|")]);
+
+  const scoreOf = (val, q) => {
+    if (val === undefined || val === null || String(val).trim() === "") return null;
+    if (q.type === "MC") {
+      if (!q.ans) return null;
+      const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+      return corrects.includes(String(val).trim().toUpperCase()) ? (q.max || 1) : 0;
+    }
+    const n = parseFloat(val);
+    return isNaN(n) ? 0 : n;
+  };
+
+  const compute = async () => {
+    if (!cohortStudents.length) return alert("此群組沒有學生");
+    if (!utExamId) return alert("請選擇 UT 考試");
+    const selectedHw = hwIds.filter(id => hwSel[id]);
+    setLoading(true);
+    try {
+      // load exam + hw scores
+      const examPart = await loadExamScoresForExam(cohortStudents.map(s => s.id), utExamId);
+      if (examPart.__meta) delete examPart.__meta;
+      const hwScores = {};
+      for (const hwId of selectedHw) {
+        const part = await loadHomeworkScoresForHw(cohortStudents.map(s => s.id), hwId);
+        Object.keys(part).forEach(sid => {
+          if (!hwScores[sid]) hwScores[sid] = {};
+          Object.assign(hwScores[sid], part[sid] || {});
+        });
+      }
+
+      const examMap = examMaps[utExamId];
+      const raws = cohortStudents.map(s => {
+        // UT %
+        let utPct = null;
+        const erec = examPart[s.id]?.[utExamId];
+        if (erec && examMap?.questions?.length) {
+          let earned = 0, max = 0, any = false;
+          examMap.questions.forEach(q => {
+            max += q.max || 0;
+            const sc = scoreOf(erec[q.id], q);
+            if (sc === null) return;
+            any = true;
+            earned += sc;
+          });
+          if (any && max > 0) utPct = earned / max;
+        }
+        // HW average %
+        let hwSum = 0, hwN = 0;
+        selectedHw.forEach(hwId => {
+          const map = homeworkMaps[hwId];
+          if (!map?.questions?.length) return;
+          const rec = hwScores[s.id]?.[hwId];
+          if (rec && rec.remakeStatus === "EXEMPT") return;
+          let max = 0;
+          map.questions.forEach(q => { max += q.max || 0; });
+          if (max <= 0) return;
+          if (!rec || !rec.scores || !Object.keys(rec.scores).length) {
+            hwSum += 0; hwN++; return;
+          }
+          let earned = 0;
+          map.questions.forEach(q => {
+            const sc = scoreOf(rec.scores[q.id], q);
+            earned += sc === null ? 0 : sc;
+          });
+          hwSum += earned / max;
+          hwN++;
+        });
+        const hwPct = hwN > 0 ? hwSum / hwN : null;
+        // composite for curve
+        let curveParts = [];
+        if (utPct != null) curveParts.push(utPct);
+        if (hwPct != null) curveParts.push(hwPct);
+        const curveRaw = curveParts.length ? curveParts.reduce((a,b)=>a+b,0)/curveParts.length : null;
+        return { s, utPct, hwPct, curveRaw };
+      });
+
+      const withRaw = raws.filter(r => r.curveRaw != null);
+      const mean = withRaw.length ? withRaw.reduce((a,r)=>a+r.curveRaw,0)/withRaw.length : 0.65;
+
+      const nextRows = raws.map(r => {
+        // UT / HW as marks out of weight? Show as percentage scores scaled to component max
+        const utMark = r.utPct == null ? null : +(r.utPct * wUT).toFixed(1);
+        const hwMark = r.hwPct == null ? null : +(r.hwPct * wHW).toFixed(1);
+        // class performance 0-20: mean 13
+        let cp = 13;
+        if (r.curveRaw != null) {
+          cp = 13 + (r.curveRaw - mean) * 25; // sensitivity
+          cp = Math.max(0, Math.min(20, Math.round(cp * 10) / 10));
+        }
+        // scale CP to wCP if wCP !== 20
+        const cpWeighted = wCP === 20 ? cp : +(cp / 20 * wCP).toFixed(1);
+        const parts = [];
+        if (utMark != null) parts.push(utMark);
+        if (hwMark != null) parts.push(hwMark);
+        parts.push(cpWeighted);
+        const total = +parts.reduce((a,b)=>a+b,0).toFixed(1);
+        return {
+          id: r.s.id, class: r.s.class, num: r.s.num, name: r.s.name,
+          ut: utMark, hw: hwMark, cp: cpWeighted, total,
+          utPct: r.utPct, hwPct: r.hwPct
+        };
+      });
+      setRows(nextRows);
+    } catch (e) { alert(e.message); }
+    setLoading(false);
+  };
+
+  const updateCp = (sid, val) => {
+    const n = parseFloat(val);
+    setRows(prev => prev.map(r => {
+      if (r.id !== sid) return r;
+      const cp = isNaN(n) ? 0 : Math.max(0, Math.min(wCP, n));
+      const parts = [];
+      if (r.ut != null) parts.push(r.ut);
+      if (r.hw != null) parts.push(r.hw);
+      parts.push(cp);
+      return { ...r, cp, total: +parts.reduce((a,b)=>a+b,0).toFixed(1) };
+    }));
+  };
+
+  const saveSheet = async () => {
+    if (!rows.length) return alert("請先計算");
+    setSaveStatus("儲存中…");
+    try {
+      const key = (cohort || "all").replace(/\//g, "_");
+      await db.collection("continuousAssess").doc(key).set({
+        cohort: cohort || "",
+        weights: { ut: wUT, hw: wHW, cp: wCP },
+        utExamId,
+        hwIds: hwIds.filter(id => hwSel[id]),
+        rows: rows.map(r => ({ id: r.id, ut: r.ut, hw: r.hw, cp: r.cp, total: r.total })),
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+      setSaveStatus("已儲存底稿");
+      setTimeout(() => setSaveStatus(""), 2000);
+    } catch (e) { setSaveStatus(""); alert(e.message); }
+  };
+
+  const exportCsv = () => {
+    const header = ["班別","號","姓名","學生ID","UT("+wUT+")","HW("+wHW+")","課堂("+wCP+")","總分"];
+    const body = rows.map(r => [r.class, r.num, r.name, r.id, r.ut ?? "", r.hw ?? "", r.cp ?? "", r.total ?? ""]);
+    const csv = [header, ...body].map(line => line.map(c => {
+      const x = String(c ?? "");
+      return /[",\n]/.test(x) ? `"${x.replace(/"/g,'""')}"` : x;
+    }).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF"+csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `平時分_${cohort||"all"}.csv`;
+    a.click();
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="font-bold text-xl text-emerald-800">平時分輸出</h2>
+        <p className="text-sm text-slate-500">預設 UT 50% + HW 30% + 課堂表現 20%（可調）。課堂分由 UT/HW 拉曲線，平均約 13／20，可人手改。</p>
+      </div>
+
+      <div className="bg-white rounded-2xl border p-4 space-y-3">
+        <div className="grid sm:grid-cols-4 gap-3">
+          <label className="text-xs font-bold">群組
+            <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={cohort} onChange={e=>setCohort(e.target.value)}>
+              {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <label className="text-xs font-bold">UT 權重 %
+            <input type="number" className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={wUT} onChange={e=>setWUT(parseFloat(e.target.value)||0)} />
+          </label>
+          <label className="text-xs font-bold">HW 權重 %
+            <input type="number" className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={wHW} onChange={e=>setWHW(parseFloat(e.target.value)||0)} />
+          </label>
+          <label className="text-xs font-bold">課堂權重 %（滿分刻度）
+            <input type="number" className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={wCP} onChange={e=>setWCP(parseFloat(e.target.value)||0)} />
+          </label>
+        </div>
+        <label className="text-xs font-bold block">UT 考試（選一份已入分考試）
+          <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm font-semibold" value={utExamId} onChange={e=>setUtExamId(e.target.value)}>
+            {!examIds.length && <option value="">無考試</option>}
+            {examIds.map(id => <option key={id} value={id}>{id} — {examMaps[id]?.title || id}</option>)}
+          </select>
+        </label>
+        <div>
+          <div className="text-xs font-bold mb-1">計入的功課 HW（可多選）</div>
+          <div className="flex flex-wrap gap-2 max-h-28 overflow-auto">
+            {hwIds.map(id => (
+              <label key={id} className={`text-xs font-bold px-2 py-1 rounded-lg border cursor-pointer ${hwSel[id]?"border-emerald-500 bg-emerald-50":"border-slate-200"}`}>
+                <input type="checkbox" className="mr-1" checked={!!hwSel[id]} onChange={()=>setHwSel(p=>({...p,[id]:!p[id]}))} />
+                {id}
+              </label>
+            ))}
+            {!hwIds.length && <span className="text-slate-400 text-sm">此群組無功課藍圖</span>}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button disabled={loading} className="bg-emerald-600 text-white font-bold px-5 py-2 rounded-xl text-sm disabled:opacity-50" onClick={compute}>
+            {loading ? "計算中…" : "計算／預填課堂分"}
+          </button>
+          <button className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-sm" onClick={saveSheet}>儲存底稿</button>
+          <button className="border-2 font-bold px-4 py-2 rounded-xl text-sm" onClick={exportCsv}>匯出 CSV</button>
+          {saveStatus && <span className="text-sm text-slate-500 self-center">{saveStatus}</span>}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border overflow-auto max-h-[65vh]">
+        <table className="min-w-full text-sm">
+          <thead className="sticky top-0 bg-slate-50">
+            <tr>
+              {["班","號","姓名","UT","HW","課堂表現","總分"].map(h => (
+                <th key={h} className="text-left px-3 py-2 text-xs font-bold text-slate-500">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id} className="border-t">
+                <td className="px-3 py-1.5">{r.class}</td>
+                <td className="px-3 py-1.5">{r.num}</td>
+                <td className="px-3 py-1.5 font-bold">{r.name}</td>
+                <td className="px-3 py-1.5">{r.ut == null ? "—" : r.ut}</td>
+                <td className="px-3 py-1.5">{r.hw == null ? "—" : r.hw}</td>
+                <td className="px-3 py-1.5">
+                  <input type="number" step="0.1" className="w-20 border rounded px-1 py-0.5 font-bold"
+                    value={r.cp} onChange={e => updateCp(r.id, e.target.value)} />
+                  <span className="text-[10px] text-slate-400 ml-1">/{wCP}</span>
+                </td>
+                <td className="px-3 py-1.5 font-black text-emerald-700">{r.total}</td>
+              </tr>
+            ))}
+            {!rows.length && (
+              <tr><td colSpan={7} className="p-8 text-center text-slate-400">選擇 UT／HW 後按「計算／預填課堂分」</td></tr>
             )}
           </tbody>
         </table>
@@ -6109,6 +6468,7 @@ function App() {
         </div>
         {view==="ranking" && <ClassRankingView activeStudents={activeStudents} currentCohort={cohort} homeworkMaps={homeworkMaps} quizMaps={quizMaps} examMaps={examMaps} pastpaperMaps={pastpaperMaps} />}
         {view==="students" && <StudentsManageView students={students} onReload={reload} />}
+        {view==="caExport" && <ContinuousAssessView students={students} homeworkMaps={homeworkMaps} examMaps={examMaps} currentCohort={cohort} />}
         {view==="import" && <ImportView onReload={reload} />}
         {view==="idMap" && <IdMapView students={students} onReload={reload} />}
         {view==="pins" && <PinsView students={students} onReload={reload} />}
