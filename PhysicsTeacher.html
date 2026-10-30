@@ -3385,76 +3385,96 @@ function classifyProgress(prevRank, curRank, prevW, curW, history) {
 }
 
 function ExamProgressCompareBlock({ activeStudents, examMaps, examIds, currentExamId, examScores, calcStudent }) {
+  const otherExamIds = useMemo(
+    () => (examIds || []).filter(id => id && id !== currentExamId),
+    [examIds, currentExamId]
+  );
+  // 預設：自動選「非本卷」的全部較早卷（按 id 排序後本卷之前的），最多 3 份
+  const defaultBaseline = useMemo(() => {
+    const ordered = [...(examIds || [])];
+    const idx = ordered.indexOf(currentExamId);
+    if (idx > 0) return ordered.slice(Math.max(0, idx - 3), idx);
+    // 本卷在最前或不在列表：取其他卷最後最多 3 份
+    return otherExamIds.slice(-3);
+  }, [examIds, currentExamId, otherExamIds]);
+
+  const [baselineIds, setBaselineIds] = useState([]);
+  const [baselineReady, setBaselineReady] = useState(false);
+  useEffect(() => {
+    setBaselineIds(defaultBaseline);
+    setBaselineReady(true);
+    setRows(null);
+  }, [currentExamId, defaultBaseline.join("|")]);
+
   const [busy, setBusy] = useState(false);
-  const [rows, setRows] = useState(null); // [{sid, name, class, num, curW, curRank, prevW, prevRank, tag, series}]
+  const [rows, setRows] = useState(null);
   const [info, setInfo] = useState("");
+  const [cache, setCache] = useState(null); // { weightedByExam, ranksByExam }
+
+  const toggleBaseline = (id) => {
+    if (id === currentExamId) return;
+    setBaselineIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+    setRows(null);
+  };
 
   const run = async () => {
-    if (!examIds.length) return alert("沒有考試");
+    if (!currentExamId) return alert("請先在上方選擇本卷考試");
+    const bases = baselineIds.filter(id => id !== currentExamId);
+    if (!bases.length) return alert("請至少選擇一份「對照卷」（不可與本卷相同）");
+    const needLoad = [currentExamId, ...bases];
     setBusy(true);
-    setInfo("載入各卷成績中…");
+    setInfo("載入對照卷成績中…");
     try {
-      // 讀取所有可見考試（懶載入）
       const byExam = {};
-      for (const eid of examIds) {
+      for (const eid of needLoad) {
         const part = await loadExamScoresForExam(activeStudents.map(s => s.id), eid);
         if (part.__meta) delete part.__meta;
         byExam[eid] = part;
-        setInfo(`已載入 ${Object.keys(byExam).length}/${examIds.length} 卷…`);
+        setInfo(`已載入 ${Object.keys(byExam).length}/${needLoad.length} 卷…`);
       }
-      // 每卷全班加權 → 排名
       const ranksByExam = {};
       const weightedByExam = {};
-      examIds.forEach(eid => {
+      needLoad.forEach(eid => {
         const list = [];
         activeStudents.forEach(s => {
-          const rec = byExam[eid]?.[s.id]?.[eid] || byExam[eid]?.[s.id];
-          // loadExamScoresForExam stores out[sid][examId]
           const r = byExam[eid]?.[s.id]?.[eid];
           const st = calcExamWeightedFromRec(examMaps[eid], r || {});
           if (st) list.push({ sid: s.id, w: st.weighted });
         });
         list.sort((a, b) => b.w - a.w);
-        const rankMap = {};
-        const wMap = {};
-        list.forEach((item, i) => {
-          rankMap[item.sid] = i + 1;
-          wMap[item.sid] = item.w;
-        });
+        const rankMap = {}, wMap = {};
+        list.forEach((item, i) => { rankMap[item.sid] = i + 1; wMap[item.sid] = item.w; });
         ranksByExam[eid] = rankMap;
         weightedByExam[eid] = wMap;
       });
-      // 當前卷與「上一卷」（排序上前一個有分的卷）
-      const ordered = [...examIds];
-      const curIdx = ordered.indexOf(currentExamId);
-      const prevId = curIdx > 0 ? ordered[curIdx - 1] : (ordered.length > 1 ? ordered[ordered.length - 2] : null);
+      setCache({ weightedByExam, ranksByExam });
+
+      // 趨勢：按 examIds 排序後的 baseline + current
+      const trendOrder = [...(examIds || [])].filter(id => bases.includes(id) || id === currentExamId);
+      // 最近一份對照卷 = trendOrder 中 current 之前最後一份
+      const curIdx = trendOrder.indexOf(currentExamId);
+      const nearestPrev = curIdx > 0 ? trendOrder[curIdx - 1] : bases[bases.length - 1];
 
       const nextRows = activeStudents.map(s => {
-        const series = ordered.map(eid => weightedByExam[eid]?.[s.id] ?? null).filter((x, i, arr) => true);
-        const seriesValid = ordered.map(eid => weightedByExam[eid]?.[s.id]).filter(x => x != null);
+        const seriesValid = trendOrder.map(eid => weightedByExam[eid]?.[s.id]).filter(x => x != null);
         const curW = weightedByExam[currentExamId]?.[s.id] ?? null;
         const curRank = ranksByExam[currentExamId]?.[s.id] ?? null;
-        let prevW = null, prevRank = null, prevExam = null;
-        if (prevId) {
-          prevW = weightedByExam[prevId]?.[s.id] ?? null;
-          prevRank = ranksByExam[prevId]?.[s.id] ?? null;
-          prevExam = prevId;
-        }
-        // 若當前無分，跳過 tag
+        const prevW = nearestPrev ? (weightedByExam[nearestPrev]?.[s.id] ?? null) : null;
+        const prevRank = nearestPrev ? (ranksByExam[nearestPrev]?.[s.id] ?? null) : null;
         const tag = (curW != null && prevW != null)
           ? classifyProgress(prevRank, curRank, prevW, curW, seriesValid)
-          : (curW != null ? { key: "na", label: "僅一卷", icon: "•", cls: "bg-slate-50 text-slate-500 border-slate-200" }
+          : (curW != null
+            ? { key: "na", label: "對照無分", icon: "•", cls: "bg-slate-50 text-slate-500 border-slate-200" }
             : { key: "none", label: "未入分", icon: "—", cls: "bg-slate-50 text-slate-400 border-slate-100" });
         return {
           sid: s.id, name: s.name, class: s.class, num: s.num,
-          curW, curRank, prevW, prevRank, prevExam, tag,
-          series: ordered.map(eid => ({ eid, w: weightedByExam[eid]?.[s.id], rank: ranksByExam[eid]?.[s.id] }))
+          curW, curRank, prevW, prevRank, prevExam: nearestPrev, tag,
+          series: trendOrder.map(eid => ({ eid, w: weightedByExam[eid]?.[s.id], rank: ranksByExam[eid]?.[s.id] }))
         };
       });
-      // 有當前分的排前面
       nextRows.sort((a, b) => (a.curRank || 999) - (b.curRank || 999));
       setRows(nextRows);
-      setInfo(`比較基準：本卷 ${currentExamId}` + (prevId ? ` ← 上一卷 ${prevId}` : "（無上一卷）"));
+      setInfo(`本卷 ${currentExamId}  vs 對照 ${bases.join("、")}（最近對照：${nearestPrev || "—"}）`);
     } catch (e) {
       alert(e.message);
       setInfo("");
@@ -3467,12 +3487,37 @@ function ExamProgressCompareBlock({ activeStudents, examMaps, examIds, currentEx
       <div className="flex flex-wrap justify-between gap-3 items-start">
         <div>
           <h3 className="font-bold text-lg text-slate-800">跨卷進步比較</h3>
-          <p className="text-xs text-slate-500">按全班加權排名／得分變化分類。預設不讀取其他卷，按下方按鈕才計算（節省讀取量）。</p>
+          <p className="text-xs text-slate-500">
+            本卷固定為上方所選考試。請勾選<strong>對照卷</strong>（可多選看趨勢）；系統不會用本卷跟自己比。
+            預設自動勾選本卷之前最多 3 份。按計算後才讀取。
+          </p>
         </div>
-        <button disabled={busy} className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-sm disabled:opacity-50" onClick={run}>
-          {busy ? "計算中…" : "計算各卷進步（讀取其他考試）"}
+        <button disabled={busy || !currentExamId} className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-sm disabled:opacity-50" onClick={run}>
+          {busy ? "計算中…" : "計算進步"}
         </button>
       </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+        <div className="text-xs font-bold text-slate-600">
+          本卷（比較終點）：<span className="text-indigo-700 font-black">{currentExamId || "—"}</span>
+        </div>
+        <div className="text-xs font-bold text-slate-600">對照卷（可多選 · 不可選本卷）</div>
+        <div className="flex flex-wrap gap-2">
+          {otherExamIds.map(id => (
+            <label key={id} className={`text-xs font-bold px-2 py-1 rounded-lg border cursor-pointer ${baselineIds.includes(id)?"border-indigo-500 bg-indigo-50":"border-slate-200 bg-white"}`}>
+              <input type="checkbox" className="mr-1" checked={baselineIds.includes(id)} onChange={() => toggleBaseline(id)} />
+              {id}{examMaps[id]?.title ? ` · ${examMaps[id].title}` : ""}
+            </label>
+          ))}
+          {!otherExamIds.length && <span className="text-xs text-slate-400">沒有其他考試可作對照</span>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="text-[11px] font-bold text-indigo-600" onClick={() => { setBaselineIds(defaultBaseline); setRows(null); }}>重設為自動建議</button>
+          <button type="button" className="text-[11px] font-bold text-slate-500" onClick={() => { setBaselineIds([...otherExamIds]); setRows(null); }}>全選對照卷</button>
+          <button type="button" className="text-[11px] font-bold text-slate-500" onClick={() => { setBaselineIds([]); setRows(null); }}>清空</button>
+        </div>
+      </div>
+
       {info && <div className="text-xs text-slate-500">{info}</div>}
       <div className="flex flex-wrap gap-2 text-[11px] font-bold">
         {[
@@ -3490,7 +3535,7 @@ function ExamProgressCompareBlock({ activeStudents, examMaps, examIds, currentEx
           <table className="min-w-full text-sm">
             <thead className="sticky top-0 bg-slate-50">
               <tr>
-                {["班","號","姓名","本卷分","本卷排名","上卷分","上卷排名","變化"].map(h => (
+                {["班","號","姓名","本卷分","本卷排名","最近對照分","對照排名","變化","趨勢"].map(h => (
                   <th key={h} className="text-left px-2 py-2 text-xs text-slate-500 font-bold">{h}</th>
                 ))}
               </tr>
@@ -3510,6 +3555,9 @@ function ExamProgressCompareBlock({ activeStudents, examMaps, examIds, currentEx
                       <span className="text-base leading-none">{r.tag.icon}</span>{r.tag.label}
                     </span>
                   </td>
+                  <td className="px-2 py-1.5 text-[11px] text-slate-500 mono">
+                    {(r.series || []).map(x => x.w != null ? Math.round(x.w) : "·").join("→")}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -3517,7 +3565,7 @@ function ExamProgressCompareBlock({ activeStudents, examMaps, examIds, currentEx
         </div>
       )}
       {!rows && !busy && (
-        <p className="text-sm text-slate-400 text-center py-6">按「計算各卷進步」後顯示全班走勢</p>
+        <p className="text-sm text-slate-400 text-center py-6">勾選對照卷後按「計算進步」</p>
       )}
     </div>
   );
@@ -4192,6 +4240,14 @@ function ExamPersonalAnalysisView({ activeStudents, examMaps, currentCohort }) {
     }).filter(x => x.weighted != null);
   }, [selectedExams, scores, examMaps]);
 
+  // DSE 模擬等級：已選考試綜合加權平均
+  const gradeEstimate = useMemo(() => {
+    if (!selectedStudentId || !examScoresList.length) return null;
+    const avg = examScoresList.reduce((a, x) => a + x.weighted, 0) / examScoresList.length;
+    const grade = estimateDseLevel(avg / 100);
+    return { avg, grade, papers: examScoresList.length, list: examScoresList };
+  }, [selectedStudentId, examScoresList]);
+
   useEffect(() => {
     if (!selectedStudentId || !chartRef.current) return;
     const ds = studentAnalysis.domainStats || {};
@@ -4293,11 +4349,32 @@ ${aiExtra.notes ? "\\n【另】溫習筆記條列。" : ""}${aiExtra.ppt ? "\\n�
                 {examScoresList.map(x => (
                   <span key={x.id} className="text-sm font-bold px-2 py-1 rounded-lg bg-slate-50 border">
                     {x.id}: <span className="text-violet-700">{x.weighted.toFixed(1)}</span>/100
+                    <span className={`ml-1 text-[10px] px-1 rounded border ${estimateDseLevel(x.weighted/100).color}`}>{estimateDseLevel(x.weighted/100).level}</span>
                   </span>
                 ))}
               </div>
             )}
           </div>
+
+          {gradeEstimate && (
+            <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border-2 border-purple-200 rounded-2xl p-5 flex flex-wrap items-center gap-6">
+              <div>
+                <div className="text-xs font-bold text-purple-600 uppercase tracking-wide">DSE 模擬等級預估（校內參考）</div>
+                <div className="flex items-end gap-3 mt-1">
+                  <span className={`text-4xl font-black px-4 py-2 rounded-xl border-2 ${gradeEstimate.grade.color}`}>{gradeEstimate.grade.level}</span>
+                  <div className="pb-1">
+                    <div className="text-lg font-black text-slate-800">平均加權 {gradeEstimate.avg.toFixed(1)} / 100</div>
+                    <div className="text-xs text-slate-500">根據已選 {gradeEstimate.papers} 份考試 · 用作目標與進度參考，非公開試預測</div>
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {["5**","5*","5","4","3","2","1","U"].map(lv => (
+                  <span key={lv} className={`text-xs font-bold px-2 py-1 rounded border ${gradeEstimate.grade.level===lv?"bg-purple-100 border-purple-400 text-purple-900":"bg-white border-slate-200 text-slate-400"}`}>{lv}</span>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="grid lg:grid-cols-2 gap-4">
             <div className="bg-white rounded-2xl border p-4">
