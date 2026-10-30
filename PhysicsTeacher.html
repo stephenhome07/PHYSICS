@@ -317,6 +317,75 @@ async function savePastpaperMapsBulk(mapsObj) {
   await commit();
 }
 
+async function loadPastpaperScoresForPaper(studentIds, paperId) {
+  const out = {};
+  const meta = { found: 0, errors: 0, tried: studentIds.length };
+  const chunk = 15;
+  for (let i = 0; i < studentIds.length; i += chunk) {
+    const slice = studentIds.slice(i, i + chunk);
+    await Promise.all(slice.map(async sid => {
+      try {
+        const snap = await db.collection("scores").doc(sid).collection("pastpapers").doc(String(paperId)).get();
+        if (snap.exists) {
+          let data = snap.data() || {};
+          if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
+            data = { ...data.value, updatedAt: data.updatedAt };
+          }
+          if (!out[sid]) out[sid] = {};
+          out[sid][paperId] = data;
+          meta.found++;
+        }
+      } catch (e) {
+        meta.errors++;
+        console.warn("loadPastpaper", sid, paperId, e && e.message);
+      }
+    }));
+  }
+  out.__meta = meta;
+  return out;
+}
+
+async function savePastpaperScore(studentId, paperId, record) {
+  await db.collection("scores").doc(studentId).collection("pastpapers").doc(String(paperId)).set({
+    ...record,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+
+async function deletePastpaperScore(studentId, paperId) {
+  await db.collection("scores").doc(studentId).collection("pastpapers").doc(String(paperId)).delete();
+}
+
+/** DSE 模擬等級：參考近年 Physics 公開試表現分佈粗略對應卷面得分率 */
+function estimateDseLevel(pct01) {
+  const p = (pct01 == null || isNaN(pct01)) ? null : (pct01 > 1 ? pct01 / 100 : pct01);
+  if (p == null) return { level: "—", color: "bg-slate-100 text-slate-500 border-slate-200", minPct: null };
+  const pct = p * 100;
+  // 粗略門檻（參考 MC 答對題數比例換算 + 實務校內用）
+  if (pct >= 85) return { level: "5**", color: "bg-purple-100 text-purple-800 border-purple-300", minPct: 85 };
+  if (pct >= 78) return { level: "5*", color: "bg-indigo-100 text-indigo-800 border-indigo-300", minPct: 78 };
+  if (pct >= 67) return { level: "5", color: "bg-blue-100 text-blue-800 border-blue-300", minPct: 67 };
+  if (pct >= 55) return { level: "4", color: "bg-sky-100 text-sky-800 border-sky-300", minPct: 55 };
+  if (pct >= 40) return { level: "3", color: "bg-emerald-100 text-emerald-800 border-emerald-300", minPct: 40 };
+  if (pct >= 30) return { level: "2", color: "bg-amber-100 text-amber-900 border-amber-300", minPct: 30 };
+  if (pct >= 20) return { level: "1", color: "bg-orange-100 text-orange-800 border-orange-300", minPct: 20 };
+  return { level: "U", color: "bg-rose-100 text-rose-800 border-rose-300", minPct: 0 };
+}
+
+function domainFromTopicId(tid) {
+  if (!tid) return "其他";
+  const s = String(tid);
+  if (s.startsWith("E3") || s.startsWith("e3")) return "E3 能量";
+  if (s.startsWith("E4") || s.startsWith("e4")) return "E4 醫學";
+  const c = s.charAt(0);
+  if (c === "1") return "1 熱";
+  if (c === "2") return "2 力";
+  if (c === "3") return "3 波";
+  if (c === "4") return "4 電";
+  if (c === "5") return "5 放射";
+  return "其他";
+}
+
 /** 考試是否適用該群組：無 cohort = 全組通用 */
 function examVisibleForCohort(map, cohort) {
   return quizVisibleForCohort(map, cohort);
@@ -439,6 +508,7 @@ function Sidebar({ view, setView }) {
       </div>
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">歷屆試題</div>
+        <Item id="ppInput" label="歷屆試題輸入及分析" />
         <Item id="ppSettings" label="Pastpaper 題庫設定" />
       </div>
     </aside>
@@ -4407,6 +4477,470 @@ ${syllabus}
 }
 
 
+
+function PastpaperInputAnalysisView({ activeStudents, pastpaperMaps, pastpaperScores, setPastpaperScores }) {
+  const paperIds = useMemo(() => Object.keys(pastpaperMaps || {}).sort().reverse(), [pastpaperMaps]);
+  const [selectedPaper, setSelectedPaper] = useState(paperIds[0] || "");
+  const [selectedStudentId, setSelectedStudentId] = useState("");
+  const [saveStatus, setSaveStatus] = useState("idle");
+  const [loading, setLoading] = useState(false);
+  const [loadInfo, setLoadInfo] = useState("");
+  const inputRefs = useRef({});
+  const timer = useRef(null);
+
+  const [heatSel, setHeatSel] = useState([]);
+  const [aiMc, setAiMc] = useState(5);
+  const [aiLq, setAiLq] = useState(2);
+  const [aiLevel, setAiLevel] = useState("中");
+  const [aiExtra, setAiExtra] = useState({ practice: true, ppt: false, notes: false, explainImg: false });
+
+  useEffect(() => {
+    if (paperIds.length && !paperIds.includes(selectedPaper)) setSelectedPaper(paperIds[0] || "");
+  }, [paperIds]);
+
+  useEffect(() => {
+    if (!selectedPaper || !activeStudents.length) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setLoadInfo("");
+      try {
+        const part = await loadPastpaperScoresForPaper(activeStudents.map(s => s.id), selectedPaper);
+        if (cancelled) return;
+        const meta = part.__meta || {};
+        delete part.__meta;
+        setPastpaperScores(prev => {
+          const next = { ...prev };
+          Object.keys(part).forEach(sid => {
+            next[sid] = { ...(next[sid] || {}), ...(part[sid] || {}) };
+          });
+          if ((meta.errors || 0) === 0) {
+            activeStudents.forEach(s => {
+              if (!part[s.id] || !part[s.id][selectedPaper]) {
+                if (next[s.id] && next[s.id][selectedPaper]) {
+                  const copy = { ...next[s.id] };
+                  delete copy[selectedPaper];
+                  next[s.id] = copy;
+                }
+              }
+            });
+          }
+          return next;
+        });
+        setLoadInfo(`讀取 ${meta.found || 0}/${meta.tried || 0} 人有此卷成績` + (meta.errors ? `（${meta.errors} 次失敗）` : ""));
+      } catch (e) {
+        setLoadInfo("讀取失敗：" + (e.message || String(e)));
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedPaper, activeStudents.map(s => s.id).join(",")]);
+
+  useEffect(() => { setHeatSel([]); }, [selectedPaper]);
+
+  const map = pastpaperMaps[selectedPaper];
+  const qList = map?.questions || [];
+
+  const calcStudent = (sid) => {
+    if (!map) return null;
+    const rec = pastpaperScores[sid]?.[selectedPaper] || {};
+    let mcScore = 0, mcMax = 0, lqScore = 0, lqMax = 0, any = false, totalMax = 0;
+    qList.forEach(q => {
+      const max = q.max || 1;
+      totalMax += max;
+      if (q.type === "MC") mcMax += max; else lqMax += max;
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      any = true;
+      if (q.type === "MC") {
+        if (q.ans) {
+          const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+          if (corrects.includes(String(raw).trim().toUpperCase())) mcScore += max;
+        }
+      } else {
+        const n = parseFloat(raw);
+        lqScore += isNaN(n) ? 0 : n;
+      }
+    });
+    if (!any) return null;
+    const total = mcScore + lqScore;
+    const pct = totalMax > 0 ? total / totalMax : 0;
+    const grade = estimateDseLevel(pct);
+    return { mcScore, mcMax, lqScore, lqMax, total, max: totalMax, pct, grade };
+  };
+
+  const focusNext = (fromQid) => {
+    const idx = qList.findIndex(q => q.id === fromQid);
+    if (idx < 0 || idx >= qList.length - 1) return;
+    const nextId = qList[idx + 1].id;
+    setTimeout(() => {
+      const el = inputRefs.current[nextId] || document.querySelector('[data-pp-qid="'+nextId+'"]');
+      if (el) { el.focus(); if (el.select) el.select(); }
+    }, 40);
+  };
+
+  const scheduleSave = (sid, paperId, record) => {
+    setSaveStatus("saving");
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      try {
+        await savePastpaperScore(sid, paperId, record);
+        setSaveStatus("saved");
+        setTimeout(() => setSaveStatus(s => s === "saved" ? "idle" : s), 1500);
+      } catch (e) { setSaveStatus("idle"); alert(e.message); }
+    }, 800);
+  };
+
+  const setQVal = (qid, raw, q) => {
+    if (!selectedStudentId || !selectedPaper) return;
+    let stored = raw;
+    if (raw === "" || raw === null || raw === undefined) stored = "";
+    else if (q.type === "MC") {
+      let v = String(raw).toUpperCase().trim();
+      if (v === "1") v = q.ans ? q.ans.split(",")[0].trim().toUpperCase() : "A";
+      else if (v === "0") v = "X";
+      else v = v.replace(/[^A-DX]/g, "").slice(0, 1);
+      stored = v;
+    } else {
+      if (raw === "") stored = "";
+      else {
+        const n = parseFloat(raw);
+        if (isNaN(n)) return;
+        stored = Math.min(n, q.max || n);
+      }
+    }
+    const month = new Date().toISOString().substring(0, 7);
+    setPastpaperScores(prev => {
+      const prevRec = { ...(prev[selectedStudentId]?.[selectedPaper] || {}) };
+      const nextRec = { ...prevRec, [qid]: stored, _submitMonth: month };
+      scheduleSave(selectedStudentId, selectedPaper, nextRec);
+      return {
+        ...prev,
+        [selectedStudentId]: {
+          ...(prev[selectedStudentId] || {}),
+          [selectedPaper]: nextRec
+        }
+      };
+    });
+    if (stored !== "" && stored !== null) focusNext(qid);
+  };
+
+  // Analysis
+  const qStats = useMemo(() => {
+    if (!map) return [];
+    return qList.map(q => {
+      let earned = 0, attempts = 0;
+      activeStudents.forEach(s => {
+        const rec = pastpaperScores[s.id]?.[selectedPaper];
+        if (!rec) return;
+        const raw = rec[q.id];
+        if (raw === undefined || raw === null || String(raw).trim() === "") return;
+        attempts++;
+        const sc = quizQuestionScore(q, raw);
+        if (sc != null) earned += sc;
+      });
+      const passRate = attempts > 0 && q.max > 0 ? earned / (attempts * q.max) : null;
+      let heat = "bg-slate-50 text-slate-400 border-slate-200";
+      if (passRate != null) {
+        if (passRate < 0.4) heat = "bg-red-500 text-white border-red-600";
+        else if (passRate < 0.6) heat = "bg-orange-300 text-orange-900 border-orange-400";
+        else if (passRate < 0.8) heat = "bg-emerald-300 text-emerald-900 border-emerald-400";
+        else heat = "bg-emerald-500 text-white border-emerald-600";
+      }
+      return { ...q, attempts, passRate, pct: passRate == null ? null : passRate * 100, heat };
+    });
+  }, [map, qList, activeStudents, pastpaperScores, selectedPaper]);
+
+  const macro = useMemo(() => {
+    const bag = {};
+    qStats.forEach(q => {
+      const d = domainFromTopicId(q.topicId);
+      if (!bag[d]) bag[d] = { domain: d, score: 0, max: 0, n: 0 };
+      if (q.passRate == null) return;
+      bag[d].score += q.passRate * (q.max || 1) * q.attempts;
+      bag[d].max += (q.max || 1) * q.attempts;
+      bag[d].n++;
+    });
+    return Object.values(bag).map(x => ({
+      ...x,
+      pct: x.max > 0 ? (x.score / x.max) * 100 : null
+    })).sort((a, b) => (a.pct ?? 999) - (b.pct ?? 999));
+  }, [qStats]);
+
+  const micro = useMemo(() => {
+    const bag = {};
+    qStats.forEach(q => {
+      const tid = q.topicId || "（無）";
+      if (!bag[tid]) bag[tid] = { topicId: tid, score: 0, max: 0, descs: new Set() };
+      if (q.passRate == null) return;
+      bag[tid].score += q.passRate * (q.max || 1) * q.attempts;
+      bag[tid].max += (q.max || 1) * q.attempts;
+      if (q.topicDesc) bag[tid].descs.add(q.topicDesc);
+    });
+    return Object.values(bag).map(x => ({
+      ...x,
+      pct: x.max > 0 ? (x.score / x.max) * 100 : null,
+      descs: Array.from(x.descs)
+    })).sort((a, b) => (a.pct ?? 999) - (b.pct ?? 999));
+  }, [qStats]);
+
+  const ranking = useMemo(() => {
+    return activeStudents.map(s => {
+      const st = calcStudent(s.id);
+      return st ? { s, ...st } : null;
+    }).filter(Boolean).sort((a, b) => b.pct - a.pct);
+  }, [activeStudents, pastpaperScores, selectedPaper, map]);
+
+  const buildHeatPrompt = () => {
+    const qs = qStats.filter(q => heatSel.includes(q.id));
+    if (!qs.length) return "";
+    const lines = qs.map(q => formatWeakItem(q, `全班得分率 ${q.pct == null ? "—" : Math.round(q.pct) + "%"}`)).join("\n");
+    const topicIds = qs.map(q => q.topicId).filter(Boolean);
+    const syllabus = getSyllabusTableText(topicIds);
+    const tasks = [];
+    if (aiExtra.practice) tasks.push(`A. 針對性練習：${aiMc} MC + ${aiLq} LQ，難度「${aiLevel}」。每題標明 topicId。`);
+    if (aiExtra.explainImg) tasks.push(`B. 解說圖描述（每弱項）。`);
+    if (aiExtra.ppt) tasks.push(`C. PPT 大綱 8–12 頁。`);
+    if (aiExtra.notes) tasks.push(`D. 溫習筆記。`);
+    if (!tasks.length) tasks.push(`A. 練習 ${aiMc} MC + ${aiLq} LQ。`);
+    return `【身份】你是香港 DSE 物理科老師。
+
+【任務】全班剛完成歷屆試題「${map?.title || selectedPaper}」。請針對下列盲點出教材／練習。
+
+【錯題／弱項】（含 topicId 與描述）
+${lines}
+
+【課程大綱參考】
+${syllabus}
+
+【產出】
+${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
+
+【其他】繁體中文；對應 topicId；直接給內容。`;
+  };
+
+  if (!paperIds.length) {
+    return <div className="p-8 text-slate-400">尚未有 Pastpaper 題庫。請到「Pastpaper 題庫設定」用 JSON 匯入。</div>;
+  }
+  if (!map) return <div className="p-8 text-slate-400">找不到試卷資料</div>;
+
+  const rec = selectedStudentId ? (pastpaperScores[selectedStudentId]?.[selectedPaper] || {}) : {};
+  const cur = selectedStudentId ? calcStudent(selectedStudentId) : null;
+
+  return (
+    <div className="space-y-4">
+      {/* 輸入區 */}
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-4 space-y-3">
+          <select className="w-full border rounded-lg px-2 py-2 text-sm font-bold" value={selectedPaper}
+            onChange={e => { setSelectedPaper(e.target.value); setSelectedStudentId(""); }}>
+            {paperIds.map(id => <option key={id} value={id}>{id} — {pastpaperMaps[id].title || id}</option>)}
+          </select>
+          {loading && <div className="text-[11px] text-slate-400">載入成績中…</div>}
+          {!!loadInfo && <div className="text-[11px] text-slate-500">{loadInfo}</div>}
+          <div className="max-h-[58vh] overflow-auto space-y-1">
+            {activeStudents.map(s => {
+              const st = calcStudent(s.id);
+              return (
+                <button key={s.id} onClick={() => setSelectedStudentId(s.id)}
+                  className={`w-full text-left px-3 py-2 rounded-xl border text-sm ${selectedStudentId===s.id?"border-indigo-400 bg-indigo-50 ring-1 ring-indigo-200":"border-slate-100 hover:bg-slate-50"}`}>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="font-semibold"><b>{s.class}-{s.num}</b> {s.name}</span>
+                    {!st && <span className="text-[10px] text-slate-400">未入分</span>}
+                    {st && (
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-xs font-black text-slate-700">{st.total}/{st.max}</span>
+                        <span className={`text-[10px] font-black px-1.5 py-0.5 rounded border ${st.grade.color}`}>{st.grade.level}</span>
+                      </span>
+                    )}
+                  </div>
+                  {st && (
+                    <div className="mt-1 flex flex-wrap gap-1 text-[10px] font-bold">
+                      <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">MC {st.mcScore}/{st.mcMax}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-fuchsia-50 text-fuchsia-700">LQ {st.lqScore}/{st.lqMax}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-slate-50 text-slate-600">{Math.round(st.pct*100)}%</span>
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4">
+          {!selectedStudentId ? (
+            <p className="text-slate-400 p-8 text-center">選擇學生輸入歷屆試題成績（0 分有效；MC 可按 1=對／0=錯）</p>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap justify-between items-center gap-2">
+                <div className="font-bold">{activeStudents.find(x=>x.id===selectedStudentId)?.name} · {selectedPaper}</div>
+                <div className="flex items-center gap-2">
+                  {cur && (
+                    <>
+                      <span className="text-sm font-bold">{cur.total}/{cur.max}</span>
+                      <span className={`text-xs font-black px-2 py-1 rounded border ${cur.grade.color}`}>預測 {cur.grade.level}</span>
+                    </>
+                  )}
+                  <span className="text-xs text-slate-400">{saveStatus==="saving"?"儲存中…":saveStatus==="saved"?"已存":""}</span>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-500">等級為校內模擬（參考公開試表現分佈粗略門檻），非正式評級。</p>
+              <div className="space-y-2 max-h-[55vh] overflow-auto">
+                {qList.map(q => {
+                  const raw = rec[q.id];
+                  const has = raw !== undefined && raw !== null && String(raw).trim() !== "";
+                  let scoreColor = "border-slate-200 bg-white";
+                  if (has) {
+                    if (q.type === "MC") {
+                      const ok = q.ans && q.ans.toString().split(",").map(a=>a.trim().toUpperCase()).includes(String(raw).trim().toUpperCase());
+                      scoreColor = ok ? "border-emerald-400 bg-emerald-50 text-emerald-800" : "border-rose-400 bg-rose-50 text-rose-700";
+                    } else {
+                      const n = parseFloat(raw);
+                      if (!isNaN(n) && n <= 0) scoreColor = "border-rose-400 bg-rose-50 text-rose-700";
+                      else if (!isNaN(n) && n >= (q.max||0)) scoreColor = "border-emerald-400 bg-emerald-50 text-emerald-800";
+                      else scoreColor = "border-amber-400 bg-amber-50 text-amber-800";
+                    }
+                  }
+                  return (
+                    <div key={q.id} className="border rounded-xl p-2 flex gap-2 items-center">
+                      <div className="w-28 shrink-0">
+                        <div className="text-xs font-bold mono truncate" title={q.id}>{q.id.split("-").slice(-2).join("-")}</div>
+                        <div className="text-[10px] text-slate-400">{q.type}</div>
+                      </div>
+                      <div className="flex-1 text-xs text-slate-600 truncate" title={q.topicDesc}>{q.topicId} {q.topicDesc}</div>
+                      <div className="flex items-center gap-1">
+                        {q.type === "MC" ? (
+                          <input data-pp-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}}
+                            className={`w-14 border-2 rounded px-1 py-1 text-center font-bold uppercase ${scoreColor}`}
+                            maxLength={1} value={raw ?? ""}
+                            onChange={e=>setQVal(q.id, e.target.value, q)}
+                            onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
+                          />
+                        ) : (
+                          <input data-pp-qid={q.id} ref={el=>{if(el)inputRefs.current[q.id]=el;}} type="number"
+                            className={`w-16 border-2 rounded px-1 py-1 text-center font-bold ${scoreColor}`}
+                            value={raw ?? ""}
+                            onChange={e=>setQVal(q.id, e.target.value, q)}
+                            onKeyDown={e=>{ if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); focusNext(q.id);} }}
+                          />
+                        )}
+                        {q.type !== "MC" && <span className="text-[11px] font-bold text-slate-400">/{q.max}</span>}
+                        {q.type==="MC" && q.ans && <span className="text-[10px] text-slate-500 font-bold">{q.ans}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Macro / Micro */}
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-white rounded-2xl border p-4">
+          <h3 className="font-bold text-sky-700 mb-2">該卷涵蓋大領域表現 (Macro)</h3>
+          {!macro.length ? <p className="text-slate-400 text-sm">尚無數據</p> : (
+            <div className="space-y-2">
+              {macro.map(d => (
+                <div key={d.domain} className="flex items-center gap-2 text-sm">
+                  <span className="w-20 font-bold shrink-0">{d.domain}</span>
+                  <div className="flex-1 h-3 rounded-full bg-slate-100 overflow-hidden">
+                    <div className={`h-full ${d.pct!=null&&d.pct<40?"bg-rose-500":d.pct<60?"bg-amber-400":"bg-emerald-500"}`} style={{width: (d.pct||0)+"%"}} />
+                  </div>
+                  <span className="w-12 text-right font-bold text-xs">{d.pct==null?"—":Math.round(d.pct)+"%"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="bg-white rounded-2xl border p-4 max-h-64 overflow-auto">
+          <h3 className="font-bold text-pink-700 mb-2">各子課題表現剖析 (Micro)</h3>
+          {!micro.length ? <p className="text-slate-400 text-sm">尚無數據</p> : (
+            <div className="space-y-1.5">
+              {micro.slice(0, 24).map(t => (
+                <div key={t.topicId} className="flex items-center gap-2 text-xs">
+                  <span className="mono font-bold w-14 shrink-0">{t.topicId}</span>
+                  <div className="flex-1 h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div className={`h-full ${t.pct!=null&&t.pct<40?"bg-rose-500":t.pct<60?"bg-amber-400":"bg-emerald-500"}`} style={{width: (t.pct||0)+"%"}} />
+                  </div>
+                  <span className="w-10 text-right font-bold">{t.pct==null?"—":Math.round(t.pct)+"%"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Heatmap + ranking */}
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4 space-y-3">
+          <h3 className="font-bold text-pink-700">全班錯題熱力分佈 (Error Heatmap)</h3>
+          <p className="text-xs text-slate-500">點選弱項方塊多選 → 下方生成 Prompt（練習／PPT／筆記）。紅＝難、綠＝易。</p>
+          <div className="flex flex-wrap gap-1.5">
+            {qStats.map(q => {
+              const on = heatSel.includes(q.id);
+              return (
+                <button key={q.id} type="button" onClick={() => setHeatSel(prev => prev.includes(q.id) ? prev.filter(x=>x!==q.id) : [...prev, q.id])}
+                  className={`text-[10px] font-bold px-2 py-1.5 rounded-lg border ${q.heat} ${on?"ring-2 ring-offset-1 ring-pink-500":""}`}
+                  title={`${q.id}\n${q.topicDesc||""}\n${q.pct==null?"—":Math.round(q.pct)+"%"}`}>
+                  {q.id.split("-").pop()}
+                  <span className="block opacity-80">{q.pct==null?"—":Math.round(q.pct)+"%"}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="rounded-xl border-2 border-pink-200 bg-pink-50 p-4 space-y-3">
+            <div className="font-bold text-pink-900 text-sm">已選 {heatSel.length} 題 · AI Prompt</div>
+            <div className="flex flex-wrap gap-2">
+              <button className="text-xs font-bold px-2 py-1 bg-white border rounded" onClick={()=>setHeatSel(qStats.filter(q=>q.pct!=null&&q.pct<60).map(q=>q.id))}>全選弱項(&lt;60%)</button>
+              <button className="text-xs font-bold px-2 py-1 bg-white border rounded" onClick={()=>setHeatSel([])}>清空</button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <label className="text-xs font-bold">難度
+                <select className="mt-0.5 w-full border rounded px-1 py-1" value={aiLevel} onChange={e=>setAiLevel(e.target.value)}>
+                  <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
+                </select>
+              </label>
+              <label className="text-xs font-bold">MC
+                <input type="number" className="mt-0.5 w-full border rounded px-1 py-1" value={aiMc} onChange={e=>setAiMc(parseInt(e.target.value)||0)} />
+              </label>
+              <label className="text-xs font-bold">LQ
+                <input type="number" className="mt-0.5 w-full border rounded px-1 py-1" value={aiLq} onChange={e=>setAiLq(parseInt(e.target.value)||0)} />
+              </label>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[["practice","練習"],["explainImg","解說圖"],["ppt","PPT"],["notes","筆記"]].map(([k,lab])=>(
+                <label key={k} className={`text-xs font-bold px-2 py-1 rounded border cursor-pointer ${aiExtra[k]?"border-pink-500 bg-white":"border-slate-200"}`}>
+                  <input type="checkbox" className="mr-1" checked={!!aiExtra[k]} onChange={e=>setAiExtra(x=>({...x,[k]:e.target.checked}))} />{lab}
+                </label>
+              ))}
+            </div>
+            <button disabled={!heatSel.length} className="bg-pink-600 disabled:opacity-40 text-white font-bold text-sm px-4 py-2 rounded-lg"
+              onClick={() => navigator.clipboard.writeText(buildHeatPrompt()).then(()=>alert("已複製")).catch(()=>alert("失敗"))}>
+              複製錯題 Prompt（含描述 + Topic ID）
+            </button>
+          </div>
+        </div>
+        <div className="lg:col-span-2 bg-white rounded-2xl border p-4">
+          <h3 className="font-bold text-indigo-700 mb-2">該卷排行 · 模擬等級</h3>
+          <div className="max-h-96 overflow-auto space-y-1">
+            {ranking.map((r, i) => (
+              <div key={r.s.id} className="flex items-center gap-2 text-sm border-b py-1.5">
+                <span className="w-6 text-slate-400 font-bold text-xs">{i+1}</span>
+                <span className="flex-1 font-semibold truncate">{r.s.class}-{r.s.num} {r.s.name}</span>
+                <span className="font-bold text-xs">{r.total}/{r.max}</span>
+                <span className={`text-[10px] font-black px-1.5 py-0.5 rounded border ${r.grade.color}`}>{r.grade.level}</span>
+              </div>
+            ))}
+            {!ranking.length && <p className="text-slate-400 text-sm">尚無入分</p>}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-2">等級門檻為校內模擬參考（約：5**≥85%、5≥67%、4≥55%、3≥40%、2≥30%），非正式公開試評級。</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PastpaperSettingsView({ pastpaperMaps, setPastpaperMaps }) {
   const [jsonText, setJsonText] = useState("");
   const [status, setStatus] = useState("");
@@ -4535,6 +5069,9 @@ ${syllabus}
 
   return (
     <div className="space-y-4">
+      <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-sm text-indigo-900">
+        <b>新增 Pastpaper：</b>用下方 AI Prompt 生成 JSON → 貼到右側「匯入／編輯 JSON」→ 按「匯入到 Firebase」。可一次貼多年份／多卷（頂層多個 key）。左側列表點選可預覽已有卷。
+      </div>
       <div className="grid lg:grid-cols-5 gap-4">
         <div className="lg:col-span-2 bg-white rounded-2xl border p-4 space-y-3">
           <h2 className="font-bold text-lg text-indigo-800">已匯入題庫</h2>
@@ -4590,6 +5127,7 @@ function App() {
   const [examMaps, setExamMaps] = useState({});
   const [examScores, setExamScores] = useState({});
   const [pastpaperMaps, setPastpaperMaps] = useState({});
+  const [pastpaperScores, setPastpaperScores] = useState({});
   const [loading, setLoading] = useState(true);
   const [cohort, setCohort] = useState("所有學生");
 
@@ -4610,6 +5148,7 @@ function App() {
       setHomeworkScores({});
       setQuizScores({});
       setExamScores({});
+      setPastpaperScores({});
     } catch(e) { alert("載入失敗："+e.message); }
     setLoading(false);
   }, []);
@@ -4645,6 +5184,7 @@ function App() {
         {view==="examInput" && <ExamInputAnalysisView activeStudents={activeStudents} examMaps={examMaps} examScores={examScores} setExamScores={setExamScores} currentCohort={cohort} />}
         {view==="examSummary" && <ExamSummaryView activeStudents={activeStudents} examMaps={examMaps} currentCohort={cohort} />}
         {view==="examSettings" && <ExamSettingsView students={students} examMaps={examMaps} setExamMaps={setExamMaps} currentCohort={cohort} />}
+        {view==="ppInput" && <PastpaperInputAnalysisView activeStudents={activeStudents} pastpaperMaps={pastpaperMaps} pastpaperScores={pastpaperScores} setPastpaperScores={setPastpaperScores} />}
         {view==="ppSettings" && <PastpaperSettingsView pastpaperMaps={pastpaperMaps} setPastpaperMaps={setPastpaperMaps} />}
       </main>
     </div>
