@@ -37,10 +37,17 @@ const db = firebase.firestore();
 
 // ---------- 課程大綱（Topic ID）----------
 let SYLLABUS_TOPICS = {};
+let ACTIVE_SYLLABUS_ID = "all";
 
-async function loadSyllabus() {
+async function loadSyllabus(syllabusId) {
+  const id = syllabusId || ACTIVE_SYLLABUS_ID || "all";
+  ACTIVE_SYLLABUS_ID = id;
   try {
-    const snap = await db.collection("syllabus").doc("all").get();
+    let snap = await db.collection("syllabus").doc(String(id)).get();
+    if (!snap.exists && id !== "all") {
+      snap = await db.collection("syllabus").doc("all").get();
+      if (snap.exists) ACTIVE_SYLLABUS_ID = "all";
+    }
     if (snap.exists) {
       const data = snap.data();
       SYLLABUS_TOPICS = data.data || data.topics || data || {};
@@ -50,6 +57,53 @@ async function loadSyllabus() {
     }
   } catch (e) { console.warn("syllabus", e); }
   return SYLLABUS_TOPICS;
+}
+
+async function listSyllabusProfiles() {
+  const snap = await db.collection("syllabus").get();
+  const list = [];
+  snap.forEach(d => {
+    const data = d.data() || {};
+    const body = data.data || data.topics || {};
+    const n = body && typeof body === "object" ? Object.keys(body).length : 0;
+    list.push({ id: d.id, title: data.title || d.id, n, updatedAt: data.updatedAt || "" });
+  });
+  list.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  return list;
+}
+
+async function saveSyllabusProfile(id, title, topicsObj) {
+  await db.collection("syllabus").doc(String(id)).set({
+    title: title || id,
+    data: topicsObj || {},
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+
+async function deleteSyllabusProfile(id) {
+  if (id === "all") throw new Error("不可刪除預設 all");
+  await db.collection("syllabus").doc(String(id)).delete();
+}
+
+/** 群組 → 大綱 ID 對照 */
+async function loadCohortSyllabusMap() {
+  try {
+    const snap = await db.collection("meta").doc("cohortSyllabus").get();
+    return snap.exists ? (snap.data().map || {}) : {};
+  } catch (e) { return {}; }
+}
+
+async function saveCohortSyllabusMap(mapObj) {
+  await db.collection("meta").doc("cohortSyllabus").set({
+    map: mapObj || {},
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+
+async function resolveSyllabusIdForCohort(cohort) {
+  const map = await loadCohortSyllabusMap();
+  if (cohort && map[cohort]) return map[cohort];
+  return "all";
 }
 
 function getSyllabusTableText(topicIds) {
@@ -555,7 +609,7 @@ function Badge({ status }) {
   return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${m.cls}`}>{m.label}</span>;
 }
 
-function Sidebar({ view, setView }) {
+function Sidebar({ view, setView, cohort, setCohort, cohorts, reload, loading }) {
   const Item = ({ id, label, group }) => (
     <button onClick={() => setView(id)}
       className={`w-full text-left px-3 py-2 rounded-lg text-sm font-semibold transition ${view===id ? "bg-indigo-600 text-white" : "text-slate-600 hover:bg-slate-200"}`}>
@@ -563,10 +617,26 @@ function Sidebar({ view, setView }) {
     </button>
   );
   return (
-    <aside className="w-64 shrink-0 bg-white border-r min-h-screen p-4 space-y-4">
+    <aside className="w-64 shrink-0 bg-white border-r min-h-screen p-4 space-y-4 sticky top-0 max-h-screen overflow-y-auto">
       <div>
         <div className="font-black text-indigo-700 text-lg">Physics Teacher</div>
         <div className="text-[11px] text-slate-400">Firebase · hoyuphysics</div>
+      </div>
+      <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 space-y-2">
+        <div className="text-[10px] font-black text-indigo-700 uppercase">目前群組</div>
+        <select className="w-full border-2 border-indigo-200 rounded-lg px-2 py-1.5 text-sm font-bold bg-white"
+          value={cohort}
+          onChange={e => {
+            const v = e.target.value;
+            setCohort(v);
+            try { localStorage.setItem("phy_teacher_cohort", v); } catch (err) {}
+          }}>
+          {(cohorts || []).map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <button className="text-xs text-indigo-600 font-bold" onClick={reload} disabled={loading}>
+          {loading ? "載入中…" : "重新載入雲端"}
+        </button>
+        <p className="text-[10px] text-slate-500 leading-snug">會記住上次群組，避免預設「所有學生」一次讀太多成績。</p>
       </div>
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">排行</div>
@@ -601,6 +671,7 @@ function Sidebar({ view, setView }) {
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">資料</div>
         <Item id="students" label="學生名單管理" />
+        <Item id="syllabus" label="課程大綱設定" />
         <Item id="caExport" label="平時分輸出" />
         <Item id="import" label="匯入 Sheet / 概況" />
         <Item id="idMap" label="學生 ID 對照補齊" />
@@ -6527,8 +6598,219 @@ function ContinuousAssessView({ students, homeworkMaps, examMaps, currentCohort 
   );
 }
 
+
+function SyllabusSettingsView({ students }) {
+  const [profiles, setProfiles] = useState([]);
+  const [activeId, setActiveId] = useState("all");
+  const [title, setTitle] = useState("");
+  const [text, setText] = useState("");
+  const [cohortMap, setCohortMap] = useState({});
+  const [newId, setNewId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
+  const cohorts = useMemo(() => Array.from(new Set((students || []).map(s => s.cohort).filter(Boolean))).sort(), [students]);
+
+  const topicsToText = (topics) => {
+    const vals = Object.values(topics || {});
+    const hasRich = vals.some(v => typeof v === "object" && v && (v.topic || v.section || v.desc));
+    let s = hasRich ? "課題編號\t範疇\t課題名稱\t學習要求\n" : "課題編號\t課題名稱\n";
+    Object.entries(topics || {}).forEach(([id, val]) => {
+      if (hasRich) {
+        const sec = (typeof val === "object" && val) ? (val.section || "") : "";
+        const topic = (typeof val === "object" && val) ? (val.topic || val.name || "") : String(val || "");
+        const desc = (typeof val === "object" && val) ? (val.desc || "") : "";
+        s += `${id}\t${sec}\t${topic}\t${desc}\n`;
+      } else {
+        const topic = (typeof val === "object" && val) ? (val.topic || val.name || "") : String(val || "");
+        s += `${id}\t${topic}\n`;
+      }
+    });
+    return s;
+  };
+
+  const textToTopics = (raw) => {
+    const newSyllabus = {};
+    const lines = (raw || "").trim().split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      if (i === 0 && /課題|topic|編號/i.test(lines[i])) continue;
+      const cols = lines[i].split("\t").map(c => c.trim());
+      if (cols.length < 2 || !cols[0]) continue;
+      const id = cols[0];
+      if (cols.length >= 4) newSyllabus[id] = { section: cols[1] || "", topic: cols[2] || "", desc: cols[3] || "" };
+      else if (cols.length === 3) newSyllabus[id] = { section: "", topic: cols[1] || "", desc: cols[2] || "" };
+      else newSyllabus[id] = { section: "", topic: cols[1] || "", desc: "" };
+    }
+    return newSyllabus;
+  };
+
+  const refresh = async () => {
+    const list = await listSyllabusProfiles();
+    setProfiles(list);
+    const map = await loadCohortSyllabusMap();
+    setCohortMap(map || {});
+  };
+
+  const loadProfile = async (id) => {
+    setActiveId(id);
+    setBusy(true);
+    try {
+      const snap = await db.collection("syllabus").doc(String(id)).get();
+      if (!snap.exists) {
+        setTitle(id);
+        setText("課題編號\t範疇\t課題名稱\t學習要求\n");
+      } else {
+        const data = snap.data() || {};
+        setTitle(data.title || id);
+        const body = data.data || data.topics || {};
+        setText(topicsToText(body));
+      }
+      await loadSyllabus(id);
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  useEffect(() => {
+    (async () => {
+      await refresh();
+      await loadProfile(ACTIVE_SYLLABUS_ID || "all");
+    })();
+  }, []);
+
+  const save = async () => {
+    if (!activeId) return;
+    setBusy(true);
+    setStatus("儲存中…");
+    try {
+      const topics = textToTopics(text);
+      await saveSyllabusProfile(activeId, title || activeId, topics);
+      SYLLABUS_TOPICS = topics;
+      ACTIVE_SYLLABUS_ID = activeId;
+      await refresh();
+      setStatus("已儲存「" + (title || activeId) + "」（" + Object.keys(topics).length + " 課題）");
+      setTimeout(() => setStatus(""), 2500);
+    } catch (e) { setStatus(""); alert(e.message); }
+    setBusy(false);
+  };
+
+  const createNew = async () => {
+    const id = (newId || "").trim().replace(/[\/\s]+/g, "_");
+    if (!id) return alert("請輸入大綱 ID，例如 DSE_current 或 S3_foundation");
+    if (profiles.some(p => p.id === id)) return alert("ID 已存在，請直接載入編輯");
+    setBusy(true);
+    try {
+      await saveSyllabusProfile(id, id, {});
+      setNewId("");
+      await refresh();
+      await loadProfile(id);
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const remove = async () => {
+    if (activeId === "all") return alert("不可刪除預設 all");
+    if (!confirm("刪除大綱「" + activeId + "」？群組若綁定此大綱會改回 all。")) return;
+    setBusy(true);
+    try {
+      await deleteSyllabusProfile(activeId);
+      const map = { ...cohortMap };
+      Object.keys(map).forEach(k => { if (map[k] === activeId) map[k] = "all"; });
+      await saveCohortSyllabusMap(map);
+      setCohortMap(map);
+      await refresh();
+      await loadProfile("all");
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const saveBindings = async () => {
+    setBusy(true);
+    try {
+      await saveCohortSyllabusMap(cohortMap);
+      alert("已儲存群組 ↔ 大綱對照");
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="space-y-4 max-w-5xl">
+      <div>
+        <h2 className="font-bold text-xl text-indigo-800">課程大綱 (Syllabus) 設定</h2>
+        <p className="text-sm text-slate-500 mt-1">
+          建議用<strong>大綱檔案（Curriculum Profile）</strong>，再讓群組綁定：例如多個高中群組共用「DSE_current」，S3 用「S3_foundation」，日後新高中用「DSE_2028」。
+          不必每個群組複製一份大綱。
+        </p>
+      </div>
+
+      <div className="grid lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-2 space-y-3">
+          <div className="bg-white rounded-2xl border p-4 space-y-2">
+            <div className="font-bold text-sm">大綱檔案列表</div>
+            <div className="max-h-48 overflow-auto space-y-1">
+              {profiles.map(p => (
+                <button key={p.id} type="button" onClick={() => loadProfile(p.id)}
+                  className={`w-full text-left px-3 py-2 rounded-lg border text-sm ${activeId===p.id?"border-indigo-400 bg-indigo-50 font-bold":"border-slate-100 hover:bg-slate-50"}`}>
+                  <div>{p.title}</div>
+                  <div className="text-[10px] text-slate-400 mono">{p.id} · {p.n} 課題</div>
+                </button>
+              ))}
+              {!profiles.length && <p className="text-xs text-slate-400">尚無。可新建，或從 Sheet 匯入到 all。</p>}
+            </div>
+            <div className="flex gap-2">
+              <input className="flex-1 border rounded-lg px-2 py-1.5 text-sm mono" placeholder="新 ID 如 S3_foundation" value={newId} onChange={e=>setNewId(e.target.value)} />
+              <button className="bg-indigo-600 text-white font-bold text-xs px-3 rounded-lg" onClick={createNew}>新建</button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border p-4 space-y-2">
+            <div className="font-bold text-sm">群組綁定大綱</div>
+            <p className="text-[11px] text-slate-500">切換頂部群組時，AI Prompt 會載入對應大綱。</p>
+            <div className="space-y-2 max-h-56 overflow-auto">
+              {cohorts.map(c => (
+                <div key={c} className="flex items-center gap-2 text-sm">
+                  <span className="w-28 font-semibold truncate" title={c}>{c}</span>
+                  <select className="flex-1 border rounded px-2 py-1 text-xs"
+                    value={cohortMap[c] || "all"}
+                    onChange={e => setCohortMap(m => ({ ...m, [c]: e.target.value }))}>
+                    {(profiles.length ? profiles : [{ id: "all", title: "all" }]).map(p => (
+                      <option key={p.id} value={p.id}>{p.title}</option>
+                    ))}
+                    {!profiles.some(p => p.id === "all") && <option value="all">all</option>}
+                  </select>
+                </div>
+              ))}
+              {!cohorts.length && <p className="text-xs text-slate-400">尚無群組（學生資料內 cohort 欄）</p>}
+            </div>
+            <button className="bg-slate-800 text-white font-bold text-sm px-3 py-1.5 rounded-lg" onClick={saveBindings}>儲存綁定</button>
+          </div>
+        </div>
+
+        <div className="lg:col-span-3 bg-white rounded-2xl border p-4 space-y-3">
+          <div className="flex flex-wrap gap-2 items-end">
+            <label className="text-xs font-bold flex-1">顯示名稱
+              <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={title} onChange={e=>setTitle(e.target.value)} />
+            </label>
+            <div className="text-xs text-slate-500 mono pb-2">ID: {activeId}</div>
+            <button disabled={busy} className="bg-indigo-600 text-white font-bold text-sm px-4 py-2 rounded-lg disabled:opacity-50" onClick={save}>儲存大綱</button>
+            {activeId !== "all" && (
+              <button className="text-rose-600 font-bold text-sm px-2" onClick={remove}>刪除</button>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500">格式：課題編號[Tab]範疇[Tab]課題名稱[Tab]學習要求（或兩欄：編號[Tab]名稱）</p>
+          <textarea className="w-full h-[28rem] border rounded-xl p-3 text-xs mono bg-slate-50"
+            value={text} onChange={e=>setText(e.target.value)}
+            placeholder={"課題編號\t範疇\t課題名稱\t學習要求\n2.3.3\t力學\t牛頓第二定律\t..."} />
+          {status && <div className="text-sm font-semibold text-emerald-700">{status}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function App() {
-  const [view, setView] = useState("import");
+  const [view, setView] = useState("hwGrade");
   const [students, setStudents] = useState([]);
   const [homeworkMaps, setHomeworkMaps] = useState({});
   const [homeworkScores, setHomeworkScores] = useState({});
@@ -6539,7 +6821,10 @@ function App() {
   const [pastpaperMaps, setPastpaperMaps] = useState({});
   const [pastpaperScores, setPastpaperScores] = useState({});
   const [loading, setLoading] = useState(true);
-  const [cohort, setCohort] = useState("所有學生");
+  const [cohort, setCohort] = useState(() => {
+    try { return localStorage.getItem("phy_teacher_cohort") || ""; } catch (e) { return ""; }
+  });
+  const [cohortReady, setCohortReady] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -6554,7 +6839,22 @@ function App() {
       setExamMaps(emaps);
       const pmaps = await loadPastpaperMaps();
       setPastpaperMaps(pmaps);
-      await loadSyllabus();
+
+      // 決定群組：記住的 > 第一個真實群組 > 所有學生
+      const realCohorts = Array.from(new Set(stu.map(s => s.cohort).filter(Boolean))).sort();
+      let saved = "";
+      try { saved = localStorage.getItem("phy_teacher_cohort") || ""; } catch (e) {}
+      let nextCohort = saved;
+      if (!nextCohort || (nextCohort !== "所有學生" && !realCohorts.includes(nextCohort))) {
+        nextCohort = realCohorts[0] || "所有學生";
+      }
+      setCohort(nextCohort);
+      try { localStorage.setItem("phy_teacher_cohort", nextCohort); } catch (e) {}
+      setCohortReady(true);
+
+      const sylId = await resolveSyllabusIdForCohort(nextCohort === "所有學生" ? "" : nextCohort);
+      await loadSyllabus(sylId);
+
       setHomeworkScores({});
       setQuizScores({});
       setExamScores({});
@@ -6565,23 +6865,31 @@ function App() {
 
   useEffect(()=>{ reload(); }, [reload]);
 
+  // 切換群組時載入對應大綱（不重讀全部 maps）
+  useEffect(() => {
+    if (!cohortReady || !cohort) return;
+    (async () => {
+      try {
+        const sylId = await resolveSyllabusIdForCohort(cohort === "所有學生" ? "" : cohort);
+        await loadSyllabus(sylId);
+      } catch (e) { console.warn(e); }
+    })();
+  }, [cohort, cohortReady]);
+
   const cohorts = useMemo(() => ["所有學生", ...Array.from(new Set(students.map(s=>s.cohort).filter(Boolean))).sort()], [students]);
-  const activeStudents = useMemo(() => cohort==="所有學生" ? students : students.filter(s=>s.cohort===cohort), [students, cohort]);
+  const activeStudents = useMemo(() => {
+    const base = cohort==="所有學生" ? students : students.filter(s=>s.cohort===cohort);
+    return base.filter(s => s.active !== false);
+  }, [students, cohort]);
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar view={view} setView={setView} />
+      <Sidebar view={view} setView={setView} cohort={cohort} setCohort={setCohort} cohorts={cohorts} reload={reload} loading={loading} />
       <main className="flex-1 p-6 overflow-auto">
-        <div className="flex flex-wrap gap-3 items-center mb-4">
-          <label className="text-sm font-bold text-slate-600">群組</label>
-          <select className="border rounded-lg px-3 py-1.5 text-sm font-semibold" value={cohort} onChange={e=>setCohort(e.target.value)}>
-            {cohorts.map(c=><option key={c} value={c}>{c}</option>)}
-          </select>
-          <button className="text-sm text-indigo-600 font-bold" onClick={reload}>重新載入雲端</button>
-          {loading && <span className="text-xs text-slate-400">載入中…</span>}
-        </div>
+        {loading && <div className="text-xs text-slate-400 mb-2">載入中…</div>}
         {view==="ranking" && <ClassRankingView activeStudents={activeStudents} currentCohort={cohort} homeworkMaps={homeworkMaps} quizMaps={quizMaps} examMaps={examMaps} pastpaperMaps={pastpaperMaps} />}
         {view==="students" && <StudentsManageView students={students} onReload={reload} />}
+        {view==="syllabus" && <SyllabusSettingsView students={students} />}
         {view==="caExport" && <ContinuousAssessView students={students} homeworkMaps={homeworkMaps} examMaps={examMaps} currentCohort={cohort} />}
         {view==="import" && <ImportView onReload={reload} />}
         {view==="idMap" && <IdMapView students={students} onReload={reload} />}
