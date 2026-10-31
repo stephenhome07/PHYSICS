@@ -155,6 +155,29 @@ async function loadMakeupCollection(col) {
   } catch (e) { console.warn(e); }
   return out;
 }
+const __summaryCache = new Map();
+async function loadScoreSummaries(studentIds) {
+  const out = {};
+  const need = [];
+  studentIds.forEach(sid => {
+    if (__summaryCache.has(sid)) out[sid] = __summaryCache.get(sid);
+    else need.push(sid);
+  });
+  for (let i = 0; i < need.length; i += 20) {
+    const slice = need.slice(i, i + 20);
+    await Promise.all(slice.map(async sid => {
+      try {
+        const snap = await db.collection("scoreSummary").doc(sid).get();
+        if (snap.exists) {
+          out[sid] = snap.data();
+          __summaryCache.set(sid, out[sid]);
+        } else out[sid] = null;
+      } catch (e) { out[sid] = null; }
+    }));
+  }
+  return out;
+}
+
 async function loadSubScores(sid, sub) {
   const out = {};
   try {
@@ -1457,6 +1480,11 @@ function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
           ...prev,
           pastpapers: { ...prev.pastpapers, [paperId]: { ...record, updatedAt: new Date().toISOString() } }
         }));
+        // 學生自助入分後標記 summary 需重建（背景）
+        try {
+          await db.collection("scoreSummary").doc(student.id).set({ needsRebuild: true, updatedAt: new Date().toISOString() }, { merge: true });
+          __summaryCache.delete(student.id);
+        } catch (e) {}
         setSaveStatus("已儲存");
       } catch (e) {
         setSaveStatus("失敗: " + e.message);
@@ -2158,26 +2186,10 @@ function StudentShell({ student, onLogout }) {
         const all = await loadAllStudents();
         const peers = all.filter(s => s.cohort && s.cohort === student.cohort);
         setCohortPeers(peers);
-        const peerOut = {};
-        const chunk = 8;
-        const mapsBundle = { homework: hw, quiz, exam, pastpaper: pp };
-        for (let i = 0; i < peers.length; i += chunk) {
-          const slice = peers.slice(i, i + chunk);
-          await Promise.all(slice.map(async s => {
-            try {
-              const [sh, sq, se, sp] = await Promise.all([
-                loadSubScores(s.id, "homeworks"),
-                loadSubScores(s.id, "quizzes"),
-                loadSubScores(s.id, "exams"),
-                loadSubScores(s.id, "pastpapers")
-              ]);
-              peerOut[s.id] = computePeerComponent(mapsBundle, {
-                homeworks: sh, quizzes: sq, exams: se, pastpapers: sp
-              }, s.cohort);
-            } catch (err) { console.warn(err); }
-          }));
-        }
+        // 只用 scoreSummary（約 N 次讀），不再拉全組成績樹
+        const peerOut = await loadScoreSummaries(peers.map(s => s.id));
         if (!cancelled) setPeerScores(peerOut);
+
       } catch (e) { alert(e.message); }
       if (!cancelled) setLoading(false);
     })();
