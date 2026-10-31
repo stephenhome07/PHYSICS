@@ -173,9 +173,9 @@ function invalidateScoreCache(sid, sub, id) {
   }
   if (sid) __summaryCache.delete(sid);
 }
-async function getScoreDocCached(sid, sub, id) {
+async function getScoreDocCached(sid, sub, id, force) {
   const key = cacheKey(sid, sub, id);
-  if (__scoreDocCache.has(key)) return __scoreDocCache.get(key);
+  if (!force && __scoreDocCache.has(key)) return __scoreDocCache.get(key);
   try {
     const snap = await db.collection("scores").doc(sid).collection(sub).doc(String(id)).get();
     const data = snap.exists ? snap.data() : null;
@@ -538,7 +538,7 @@ async function loadPastpaperScoresForPaper(studentIds, paperId) {
     const slice = studentIds.slice(i, i + chunk);
     await Promise.all(slice.map(async sid => {
       try {
-        let data = await getScoreDocCached(sid, "pastpapers", paperId);
+        let data = await getScoreDocCached(sid, "pastpapers", paperId, true); // 強制直讀雲端，避免殘留 cache
         if (data) {
           if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
             data = { ...data.value, updatedAt: data.updatedAt };
@@ -793,41 +793,55 @@ async function clearScoreSubcollection(rootRef, sub) {
 }
 
 async function clearAllFirestoreData(logm) {
-  // 先清成績（含 pastpapers），再清學生與藍圖
-  logm("清除 scores（含 pastpapers / homeworks / quizzes / exams）…");
+  // 1) 先清所有 scores 子集合（含 pastpapers）
+  logm("清除 scores（homeworks / quizzes / exams / pastpapers）…");
   let scoreDocCount = 0, scoreRootCount = 0;
-  while (true) {
-    const scoreRoots = await db.collection("scores").limit(50).get();
+  // 反覆掃到完全沒有 scores 根文件
+  for (let round = 0; round < 20; round++) {
+    const scoreRoots = await db.collection("scores").limit(100).get();
     if (scoreRoots.empty) break;
     for (const root of scoreRoots.docs) {
       for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
-        const n = await clearScoreSubcollection(root.ref, sub);
-        scoreDocCount += n;
-        if (n) logm("  · " + root.id + "/" + sub + " ×" + n);
+        // 子集合可能很多，分批刪
+        for (let guard = 0; guard < 50; guard++) {
+          const snap = await root.ref.collection(sub).limit(400).get();
+          if (snap.empty) break;
+          const batch = db.batch();
+          snap.docs.forEach(d => batch.delete(d.ref));
+          await batch.commit();
+          scoreDocCount += snap.size;
+          logm("  · 刪 " + root.id + "/" + sub + " ×" + snap.size);
+          if (snap.size < 400) break;
+        }
       }
-      await root.ref.delete();
-      scoreRootCount++;
+      try { await root.ref.delete(); scoreRootCount++; } catch (e) {
+        logm("  ⚠ 刪 scores 根 " + root.id + "：" + (e.message || e));
+      }
     }
-    if (scoreRoots.size < 50) break;
+    if (scoreRoots.size < 100) break;
   }
   logm("✓ scores（根 " + scoreRootCount + "，子文件 " + scoreDocCount + "）");
 
+  // 2) scoreSummary
   logm("清除 scoreSummary…");
-  const sumN = await clearCollectionDocs("scoreSummary");
-  logm("✓ scoreSummary (" + sumN + ")");
+  try {
+    const sumN = await clearCollectionDocs("scoreSummary");
+    logm("✓ scoreSummary (" + sumN + ")");
+  } catch (e) { logm("⚠ scoreSummary：" + (e.message || e)); }
 
-  // 記憶體快取
+  // 3) 記憶體快取
   try {
     if (typeof __scoreDocCache !== "undefined") __scoreDocCache.clear();
     if (typeof __summaryCache !== "undefined") __summaryCache.clear();
+    logm("✓ 已清空記憶體 cache");
   } catch (e) {}
 
+  // 4) 其餘集合
   const cols = [
     "students",
     "homeworkMaps", "quizMaps", "examMaps", "pastpaperMaps",
     "quizMakeup", "examMakeup",
     "syllabus", "meta", "continuousAssess",
-    // 舊遷移／可能殘留
     "pastpaperScores", "remediationProgress", "homeworkScores", "examScores", "quizScores"
   ];
   for (const c of cols) {
@@ -840,22 +854,30 @@ async function clearAllFirestoreData(logm) {
     }
   }
 
-  // 二次確認：scores / scoreSummary 是否仍有殘留
-  const leftScores = await db.collection("scores").limit(1).get();
-  const leftSum = await db.collection("scoreSummary").limit(1).get();
-  if (!leftScores.empty || !leftSum.empty) {
-    logm("⚠ 仍有殘留，再掃一次 scores / scoreSummary…");
-    while (!(await db.collection("scores").limit(1).get()).empty) {
-      const roots = await db.collection("scores").limit(50).get();
-      for (const root of roots.docs) {
-        for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
-          await clearScoreSubcollection(root.ref, sub);
-        }
-        await root.ref.delete();
+  // 5) 驗證：pastpapers 是否仍有殘留
+  logm("驗證殘留…");
+  const leftRoots = await db.collection("scores").limit(5).get();
+  if (!leftRoots.empty) {
+    logm("⚠ scores 仍有 " + leftRoots.size + "+ 根文件，再清一次…");
+    for (const root of leftRoots.docs) {
+      for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
+        const snap = await root.ref.collection(sub).get();
+        for (const d of snap.docs) await d.ref.delete();
       }
+      await root.ref.delete();
     }
-    await clearCollectionDocs("scoreSummary");
-    logm("✓ 二次清除完成");
+  }
+  // 抽樣：若仍有任何 pastpapers 子文件
+  let leftoverPp = 0;
+  const checkRoots = await db.collection("scores").limit(20).get();
+  for (const root of checkRoots.docs) {
+    const pp = await root.ref.collection("pastpapers").limit(5).get();
+    leftoverPp += pp.size;
+  }
+  if (leftoverPp > 0) {
+    logm("⚠ 仍偵測到 pastpapers 殘留 " + leftoverPp + " 份，請檢查 Firestore 規則是否允許 delete");
+  } else {
+    logm("✓ 驗證：scores/pastpapers 無殘留（抽樣）");
   }
   logm("全部清除流程結束");
 }
@@ -1044,8 +1066,13 @@ function ImportView({ onReload }) {
     try {
       await clearAllFirestoreData(logm);
       logm("✅ 已清空");
-      alert("已清空雲端資料");
+      try {
+        if (typeof __scoreDocCache !== "undefined") __scoreDocCache.clear();
+        if (typeof __summaryCache !== "undefined") __summaryCache.clear();
+      } catch (e) {}
+      alert("已清空雲端資料。請強制重新整理頁面（Ctrl+Shift+R）以清掉畫面上舊狀態。");
       if (onReload) onReload();
+      else window.location.reload();
     } catch (e) {
       logm("❌ " + e.message);
       alert(e.message);
