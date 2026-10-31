@@ -752,40 +752,112 @@ async function deleteStudentCompletely(sid) {
     for (const doc of snap.docs) await doc.ref.delete();
   }
   try { await db.collection("scores").doc(sid).delete(); } catch (e) {}
+  try { await db.collection("scoreSummary").doc(sid).delete(); } catch (e) {}
+  invalidateScoreCache(sid);
   await db.collection("students").doc(sid).delete();
 }
 
 async function clearCollectionDocs(colName) {
-  const snap = await db.collection(colName).get();
-  let batch = db.batch(), ops = 0;
-  const commit = async () => { if (!ops) return; await batch.commit(); batch = db.batch(); ops = 0; };
-  for (const d of snap.docs) {
-    batch.delete(d.ref);
-    ops++;
-    if (ops >= 400) await commit();
+  let total = 0;
+  // 分頁刪，避免一次 get 過大
+  while (true) {
+    const snap = await db.collection(colName).limit(400).get();
+    if (snap.empty) break;
+    let batch = db.batch(), ops = 0;
+    for (const d of snap.docs) {
+      batch.delete(d.ref);
+      ops++;
+    }
+    if (ops) await batch.commit();
+    total += ops;
+    if (snap.size < 400) break;
   }
-  await commit();
-  return snap.size;
+  return total;
+}
+
+async function clearScoreSubcollection(rootRef, sub) {
+  let total = 0;
+  while (true) {
+    const snap = await rootRef.collection(sub).limit(400).get();
+    if (snap.empty) break;
+    let batch = db.batch(), ops = 0;
+    for (const d of snap.docs) {
+      batch.delete(d.ref);
+      ops++;
+    }
+    if (ops) await batch.commit();
+    total += ops;
+    if (snap.size < 400) break;
+  }
+  return total;
 }
 
 async function clearAllFirestoreData(logm) {
-  const cols = ["students", "homeworkMaps", "quizMaps", "examMaps", "pastpaperMaps", "quizMakeup", "examMakeup", "syllabus", "meta", "continuousAssess"];
+  // 先清成績（含 pastpapers），再清學生與藍圖
+  logm("清除 scores（含 pastpapers / homeworks / quizzes / exams）…");
+  let scoreDocCount = 0, scoreRootCount = 0;
+  while (true) {
+    const scoreRoots = await db.collection("scores").limit(50).get();
+    if (scoreRoots.empty) break;
+    for (const root of scoreRoots.docs) {
+      for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
+        const n = await clearScoreSubcollection(root.ref, sub);
+        scoreDocCount += n;
+        if (n) logm("  · " + root.id + "/" + sub + " ×" + n);
+      }
+      await root.ref.delete();
+      scoreRootCount++;
+    }
+    if (scoreRoots.size < 50) break;
+  }
+  logm("✓ scores（根 " + scoreRootCount + "，子文件 " + scoreDocCount + "）");
+
+  logm("清除 scoreSummary…");
+  const sumN = await clearCollectionDocs("scoreSummary");
+  logm("✓ scoreSummary (" + sumN + ")");
+
+  // 記憶體快取
+  try {
+    if (typeof __scoreDocCache !== "undefined") __scoreDocCache.clear();
+    if (typeof __summaryCache !== "undefined") __summaryCache.clear();
+  } catch (e) {}
+
+  const cols = [
+    "students",
+    "homeworkMaps", "quizMaps", "examMaps", "pastpaperMaps",
+    "quizMakeup", "examMakeup",
+    "syllabus", "meta", "continuousAssess",
+    // 舊遷移／可能殘留
+    "pastpaperScores", "remediationProgress", "homeworkScores", "examScores", "quizScores"
+  ];
   for (const c of cols) {
     logm("清除 " + c + "…");
-    const n = await clearCollectionDocs(c);
-    logm("✓ " + c + " (" + n + ")");
-  }
-  // scores: each student doc + subcollections already deleted with students; residual scores roots
-  logm("清除 scores…");
-  const scoreRoots = await db.collection("scores").get();
-  for (const root of scoreRoots.docs) {
-    for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
-      const snap = await root.ref.collection(sub).get();
-      for (const d of snap.docs) await d.ref.delete();
+    try {
+      const n = await clearCollectionDocs(c);
+      logm("✓ " + c + " (" + n + ")");
+    } catch (e) {
+      logm("⚠ " + c + "：" + (e && e.message ? e.message : e));
     }
-    await root.ref.delete();
   }
-  logm("✓ scores");
+
+  // 二次確認：scores / scoreSummary 是否仍有殘留
+  const leftScores = await db.collection("scores").limit(1).get();
+  const leftSum = await db.collection("scoreSummary").limit(1).get();
+  if (!leftScores.empty || !leftSum.empty) {
+    logm("⚠ 仍有殘留，再掃一次 scores / scoreSummary…");
+    while (!(await db.collection("scores").limit(1).get()).empty) {
+      const roots = await db.collection("scores").limit(50).get();
+      for (const root of roots.docs) {
+        for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
+          await clearScoreSubcollection(root.ref, sub);
+        }
+        await root.ref.delete();
+      }
+    }
+    await clearCollectionDocs("scoreSummary");
+    logm("✓ 二次清除完成");
+  }
+  logm("全部清除流程結束");
 }
 
 async function migrateStudentId(oldId, newId, studentPatch) {
