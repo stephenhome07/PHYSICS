@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Physics Teacher </title>
+<title>Physics Teacher · Firebase</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
@@ -159,6 +159,163 @@ async function loadAllStudents() {
   return list;
 }
 
+// ===== 讀取優化：記憶體快取 + scoreSummary =====
+const __scoreDocCache = new Map();
+const __summaryCache = new Map();
+let __MAPS_BUNDLE = { homework: {}, quiz: {}, exam: {}, pastpaper: {} };
+function setMapsBundle(bundle) { __MAPS_BUNDLE = bundle || __MAPS_BUNDLE; }
+function cacheKey(sid, sub, id) { return sid + "/" + sub + "/" + id; }
+function invalidateScoreCache(sid, sub, id) {
+  if (sid && sub && id != null) __scoreDocCache.delete(cacheKey(sid, sub, id));
+  else if (sid) {
+    const prefix = sid + "/";
+    for (const k of [...__scoreDocCache.keys()]) if (k.startsWith(prefix)) __scoreDocCache.delete(k);
+  }
+  if (sid) __summaryCache.delete(sid);
+}
+async function getScoreDocCached(sid, sub, id) {
+  const key = cacheKey(sid, sub, id);
+  if (__scoreDocCache.has(key)) return __scoreDocCache.get(key);
+  try {
+    const snap = await db.collection("scores").doc(sid).collection(sub).doc(String(id)).get();
+    const data = snap.exists ? snap.data() : null;
+    __scoreDocCache.set(key, data);
+    return data;
+  } catch (e) { console.warn(key, e); return null; }
+}
+function avgPctArr(arr) { return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null; }
+function mapVisibleCohort(map, cohort) {
+  if (!map) return false;
+  if (!map.cohort || map.cohort === "" || map.cohort === "所有學生") return true;
+  if (!cohort) return true;
+  return map.cohort === cohort;
+}
+function computeSummaryFromTrees(maps, trees, cohort) {
+  const hwPcts=[], quizPcts=[], examWs=[], ppPcts=[];
+  Object.entries(maps.homework||{}).forEach(([id,m])=>{
+    if (!mapVisibleCohort(m, cohort) || !m.questions) return;
+    const rec = trees.homeworks && trees.homeworks[id];
+    if (!rec) return;
+    const body = (rec.scores && typeof rec.scores==="object") ? Object.assign({}, rec, rec.scores) : rec;
+    let earned=0,max=0,any=false;
+    m.questions.forEach(q=>{
+      max += q.max||0;
+      const raw = body[q.id];
+      if (raw===undefined||raw===null||String(raw).trim()==="") return;
+      any=true; const sc=quizQuestionScore(q,raw); earned += sc==null?0:sc;
+    });
+    if (any && max>0) hwPcts.push(earned/max);
+  });
+  Object.entries(maps.quiz||{}).forEach(([id,m])=>{
+    if (!mapVisibleCohort(m, cohort) || !m.questions) return;
+    const rec = trees.quizzes && trees.quizzes[id];
+    if (!rec) return;
+    let earned=0,max=0,any=false;
+    m.questions.forEach(q=>{
+      max += q.max||0;
+      const raw = rec[q.id];
+      if (raw===undefined||raw===null||String(raw).trim()==="") return;
+      any=true; const sc=quizQuestionScore(q,raw); earned += sc==null?0:sc;
+    });
+    if (any && max>0) quizPcts.push(earned/max);
+  });
+  Object.entries(maps.exam||{}).forEach(([id,m])=>{
+    if (!mapVisibleCohort(m, cohort)) return;
+    const rec = trees.exams && trees.exams[id];
+    if (!rec) return;
+    const st = (typeof calcExamWeightedFromRec==="function") ? calcExamWeightedFromRec(m, rec) : null;
+    if (st) examWs.push(st.weighted/100);
+  });
+  Object.entries(maps.pastpaper||{}).forEach(([id,m])=>{
+    if (!m || !m.questions) return;
+    const rec = trees.pastpapers && trees.pastpapers[id];
+    if (!rec) return;
+    let earned=0,max=0,any=false;
+    m.questions.forEach(q=>{
+      max += q.max||0;
+      const raw = rec[q.id];
+      if (raw===undefined||raw===null||String(raw).trim()==="") return;
+      any=true; const sc=quizQuestionScore(q,raw); earned += sc==null?0:sc;
+    });
+    if (any && max>0) ppPcts.push(earned/max);
+  });
+  const hw=avgPctArr(hwPcts), quiz=avgPctArr(quizPcts), exam=avgPctArr(examWs), pp=avgPctArr(ppPcts);
+  const parts=[];
+  if (hw!=null) parts.push({w:20,v:hw});
+  if (quiz!=null) parts.push({w:30,v:quiz});
+  if (exam!=null) parts.push({w:50,v:exam});
+  const sumW = parts.reduce((a,p)=>a+p.w,0);
+  const overall = sumW ? parts.reduce((a,p)=>a+p.v*(p.w/sumW),0) : null;
+  return { hw, quiz, exam, pp, overall };
+}
+async function loadStudentScoreTreeCached(sid, subs) {
+  const out = {};
+  for (const sub of subs) {
+    out[sub] = {};
+    try {
+      const snap = await db.collection("scores").doc(sid).collection(sub).get();
+      snap.forEach(d => {
+        let data = d.data() || {};
+        if (data.value && typeof data.value === "object" && !Array.isArray(data.value))
+          data = Object.assign({}, data.value, { updatedAt: data.updatedAt });
+        out[sub][d.id] = data;
+        __scoreDocCache.set(cacheKey(sid, sub, d.id), data);
+      });
+    } catch(e) { console.warn(e); }
+  }
+  return out;
+}
+async function recomputeAndSaveScoreSummary(sid, cohortHint) {
+  try {
+    const maps = __MAPS_BUNDLE;
+    const trees = await loadStudentScoreTreeCached(sid, ["homeworks","quizzes","exams","pastpapers"]);
+    let cohort = cohortHint || "";
+    if (!cohort) {
+      try {
+        const s = await db.collection("students").doc(sid).get();
+        cohort = s.exists ? (s.data().cohort || "") : "";
+      } catch(e) {}
+    }
+    const summary = computeSummaryFromTrees(maps, trees, cohort);
+    const payload = Object.assign({}, summary, { cohort: cohort||"", updatedAt: new Date().toISOString() });
+    await db.collection("scoreSummary").doc(sid).set(payload, { merge: true });
+    __summaryCache.set(sid, payload);
+    return payload;
+  } catch(e) { console.warn("recomputeSummary", sid, e); return null; }
+}
+async function loadScoreSummaries(studentIds) {
+  const out = {};
+  const need = [];
+  studentIds.forEach(sid => {
+    if (__summaryCache.has(sid)) out[sid] = __summaryCache.get(sid);
+    else need.push(sid);
+  });
+  for (let i=0; i<need.length; i+=20) {
+    const slice = need.slice(i, i+20);
+    await Promise.all(slice.map(async sid => {
+      try {
+        const snap = await db.collection("scoreSummary").doc(sid).get();
+        if (snap.exists) { out[sid]=snap.data(); __summaryCache.set(sid, out[sid]); }
+        else out[sid]=null;
+      } catch(e) { out[sid]=null; }
+    }));
+  }
+  return out;
+}
+async function ensureScoreSummaries(studentIds, studentsById) {
+  const loaded = await loadScoreSummaries(studentIds);
+  const missing = studentIds.filter(sid => {
+    const s = loaded[sid];
+    return !s || (s.hw==null && s.quiz==null && s.exam==null && s.overall==null);
+  });
+  for (const sid of missing) {
+    const cohort = studentsById && studentsById[sid] ? studentsById[sid].cohort : undefined;
+    const s = await recomputeAndSaveScoreSummary(sid, cohort);
+    if (s) loaded[sid] = s;
+  }
+  return loaded;
+}
+
 async function loadHomeworkMaps() {
   const snap = await db.collection("homeworkMaps").get();
   const maps = {};
@@ -187,10 +344,10 @@ async function loadHomeworkScoresForHw(studentIds, hwId) {
     const slice = studentIds.slice(i, i + chunk);
     await Promise.all(slice.map(async sid => {
       try {
-        const snap = await db.collection("scores").doc(sid).collection("homeworks").doc(String(hwId)).get();
-        if (snap.exists) {
+        const data = await getScoreDocCached(sid, "homeworks", hwId);
+        if (data) {
           if (!out[sid]) out[sid] = {};
-          out[sid][hwId] = snap.data();
+          out[sid][hwId] = data;
         }
       } catch(e) { console.warn(sid, hwId, e); }
     }));
@@ -238,10 +395,10 @@ async function loadQuizScoresForQuiz(studentIds, quizId) {
     const slice = studentIds.slice(i, i + chunk);
     await Promise.all(slice.map(async sid => {
       try {
-        const snap = await db.collection("scores").doc(sid).collection("quizzes").doc(String(quizId)).get();
-        if (snap.exists) {
+        const data = await getScoreDocCached(sid, "quizzes", quizId);
+        if (data) {
           if (!out[sid]) out[sid] = {};
-          out[sid][quizId] = snap.data();
+          out[sid][quizId] = data;
         }
       } catch(e) { console.warn(sid, quizId, e); }
     }));
@@ -266,6 +423,8 @@ async function saveQuizScore(studentId, quizId, record) {
     ...record,
     updatedAt: new Date().toISOString()
   }, { merge: true });
+  invalidateScoreCache(studentId, "quizzes", quizId);
+  recomputeAndSaveScoreSummary(studentId).catch(function(){});
 }
 
 async function saveQuizMap(quizId, data) {
@@ -299,10 +458,8 @@ async function loadExamScoresForExam(studentIds, examId) {
     const slice = studentIds.slice(i, i + chunk);
     await Promise.all(slice.map(async sid => {
       try {
-        const snap = await db.collection("scores").doc(sid).collection("exams").doc(String(examId)).get();
-        if (snap.exists) {
-          let data = snap.data() || {};
-          // 相容：若匯入時整份包在 value 內
+        let data = await getScoreDocCached(sid, "exams", examId);
+        if (data) {
           if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
             data = { ...data.value, updatedAt: data.updatedAt };
           }
@@ -325,6 +482,8 @@ async function saveExamScore(studentId, examId, record) {
     ...record,
     updatedAt: new Date().toISOString()
   }, { merge: true });
+  invalidateScoreCache(studentId, "exams", examId);
+  recomputeAndSaveScoreSummary(studentId).catch(function(){});
 }
 
 async function deleteExamScore(studentId, examId) {
@@ -379,9 +538,8 @@ async function loadPastpaperScoresForPaper(studentIds, paperId) {
     const slice = studentIds.slice(i, i + chunk);
     await Promise.all(slice.map(async sid => {
       try {
-        const snap = await db.collection("scores").doc(sid).collection("pastpapers").doc(String(paperId)).get();
-        if (snap.exists) {
-          let data = snap.data() || {};
+        let data = await getScoreDocCached(sid, "pastpapers", paperId);
+        if (data) {
           if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
             data = { ...data.value, updatedAt: data.updatedAt };
           }
@@ -404,6 +562,8 @@ async function savePastpaperScore(studentId, paperId, record) {
     ...record,
     updatedAt: new Date().toISOString()
   }, { merge: true });
+  invalidateScoreCache(studentId, "pastpapers", paperId);
+  recomputeAndSaveScoreSummary(studentId).catch(function(){});
 }
 
 async function deletePastpaperScore(studentId, paperId) {
@@ -578,6 +738,8 @@ async function saveHomeworkScore(studentId, hwId, record) {
     ...record,
     updatedAt: new Date().toISOString()
   }, { merge: true });
+  invalidateScoreCache(studentId, "homeworks", hwId);
+  recomputeAndSaveScoreSummary(studentId).catch(function(){});
 }
 
 async function deleteHomeworkScore(studentId, hwId) {
@@ -6476,23 +6638,46 @@ ${syllabus}
 function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMaps, examMaps, pastpaperMaps }) {
   const [rankTab, setRankTab] = useState("composite");
   const [leaderboardMonth, setLeaderboardMonth] = useState("all");
-  const [trees, setTrees] = useState({}); // sid -> { homeworks, quizzes, exams, pastpapers }
+  const [summaries, setSummaries] = useState({});
+  const [trees, setTrees] = useState({}); // 僅 Pastpaper 分頁需要時才載
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!activeStudents.length) { setTrees({}); return; }
+    if (!activeStudents.length) { setSummaries({}); return; }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        setMapsBundle({
+          homework: homeworkMaps || {},
+          quiz: quizMaps || {},
+          exam: examMaps || {},
+          pastpaper: pastpaperMaps || {}
+        });
+        const byId = {};
+        activeStudents.forEach(s => { byId[s.id] = s; });
+        const next = await ensureScoreSummaries(activeStudents.map(s => s.id), byId);
+        if (!cancelled) setSummaries(next);
+      } catch (e) { console.warn(e); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [activeStudents.map(s => s.id).join(","), currentCohort]);
+
+  // Pastpaper 分頁才懶載入成績樹（避免一進排行就爆讀取）
+  useEffect(() => {
+    if (rankTab !== "pastpaper" || !activeStudents.length) return;
+    if (Object.keys(trees).length) return;
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
         const next = {};
-        // 分批避免一次打爆
         const ids = activeStudents.map(s => s.id);
-        const chunk = 8;
-        for (let i = 0; i < ids.length; i += chunk) {
-          const slice = ids.slice(i, i + chunk);
+        for (let i = 0; i < ids.length; i += 8) {
+          const slice = ids.slice(i, i + 8);
           await Promise.all(slice.map(async sid => {
-            next[sid] = await loadStudentScoreTree(sid, ["homeworks", "quizzes", "exams", "pastpapers"]);
+            next[sid] = await loadStudentScoreTreeCached(sid, ["pastpapers"]);
           }));
         }
         if (!cancelled) setTrees(next);
@@ -6500,7 +6685,7 @@ function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMap
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [activeStudents.map(s => s.id).join(",")]);
+  }, [rankTab, activeStudents.map(s => s.id).join(",")]);
 
   const scoreOf = (val, q) => {
     if (val === undefined || val === null || String(val).trim() === "") return null;
@@ -6514,69 +6699,12 @@ function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMap
   };
 
   const calcCategoryPct = (sId, category) => {
-    const cohort = (activeStudents || []).find(x => x.id === sId)?.cohort;
-    const tree = trees[sId] || {};
-    let totalPct = 0, count = 0;
-
-    if (category === "homework") {
-      Object.keys(homeworkMaps || {}).forEach(hwId => {
-        const map = homeworkMaps[hwId];
-        if (!map?.questions?.length) return;
-        if (map.cohort && cohort && map.cohort !== cohort && map.cohort !== "" && map.cohort !== "所有學生") return;
-        const rec = tree.homeworks?.[hwId];
-        if (rec && rec.remakeStatus === "EXEMPT") return;
-        let max = 0;
-        map.questions.forEach(q => { max += q.max || 0; });
-        if (max <= 0) return;
-        if (!rec || !rec.scores || Object.keys(rec.scores).length === 0) {
-          totalPct += 0;
-          count++;
-          return;
-        }
-        let earned = 0;
-        map.questions.forEach(q => {
-          const sc = scoreOf(rec.scores[q.id], q);
-          earned += (sc === null ? 0 : sc);
-        });
-        totalPct += earned / max;
-        count++;
-      });
-    } else if (category === "quiz") {
-      Object.keys(quizMaps || {}).forEach(qid => {
-        const map = quizMaps[qid];
-        if (!map?.questions?.length) return;
-        if (map.cohort && cohort && map.cohort !== cohort && map.cohort !== "" && map.cohort !== "所有學生") return;
-        const rec = tree.quizzes?.[qid];
-        if (!rec) return;
-        let earned = 0, max = 0, has = false;
-        map.questions.forEach(q => {
-          max += q.max || 0;
-          const sc = scoreOf(rec[q.id], q);
-          if (sc === null) return;
-          has = true;
-          earned += sc;
-        });
-        if (has && max > 0) { totalPct += earned / max; count++; }
-      });
-    } else if (category === "exam") {
-      Object.keys(examMaps || {}).forEach(eid => {
-        const map = examMaps[eid];
-        if (!map?.questions?.length) return;
-        if (map.cohort && cohort && map.cohort !== cohort && map.cohort !== "" && map.cohort !== "所有學生") return;
-        const rec = tree.exams?.[eid];
-        if (!rec) return;
-        let earned = 0, max = 0, has = false;
-        map.questions.forEach(q => {
-          max += q.max || 0;
-          const sc = scoreOf(rec[q.id], q);
-          if (sc === null) return;
-          has = true;
-          earned += sc;
-        });
-        if (has && max > 0) { totalPct += earned / max; count++; }
-      });
-    }
-    return count > 0 ? totalPct / count : null;
+    const s = summaries[sId];
+    if (!s) return null;
+    if (category === "homework") return s.hw != null ? s.hw : null;
+    if (category === "quiz") return s.quiz != null ? s.quiz : null;
+    if (category === "exam") return s.exam != null ? s.exam : null;
+    return null;
   };
 
   const schoolRankings = useMemo(() => {
@@ -6602,7 +6730,7 @@ function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMap
     }).filter(r => r.pct !== null).sort((a, b) => b.pct - a.pct);
 
     return { homework: build("homework"), quiz: build("quiz"), exam: build("exam"), composite };
-  }, [activeStudents, trees, homeworkMaps, quizMaps, examMaps]);
+  }, [activeStudents, summaries, homeworkMaps, quizMaps, examMaps]);
 
   const availableMonths = useMemo(() => {
     const months = new Set();
@@ -7836,6 +7964,7 @@ function App() {
       const emaps = await loadExamMaps();
       setExamMaps(emaps);
       const pmaps = await loadPastpaperMaps();
+      setMapsBundle({ homework: maps, quiz: qmaps, exam: emaps, pastpaper: pmaps });
       setPastpaperMaps(pmaps);
 
       // 決定群組：記住的 > 第一個真實群組 > 所有學生
