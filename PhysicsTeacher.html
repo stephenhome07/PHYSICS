@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="viewport" content="S尸width=device-width, initial-scale=1.0"/>
 <title>Physics Teacher · Firebase</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
@@ -793,50 +793,60 @@ async function clearScoreSubcollection(rootRef, sub) {
 }
 
 async function clearAllFirestoreData(logm) {
-  // 1) 先清所有 scores 子集合（含 pastpapers）
-  logm("清除 scores（homeworks / quizzes / exams / pastpapers）…");
-  let scoreDocCount = 0, scoreRootCount = 0;
-  // 反覆掃到完全沒有 scores 根文件
-  for (let round = 0; round < 20; round++) {
+  // Firestore 重點：父文件刪了，子集合仍可存在；collection("scores").get() 掃不到「無父文件」的孤兒。
+  // 必須用 collectionGroup 清 homeworks/quizzes/exams/pastpapers。
+
+  async function deleteByCollectionGroup(groupName) {
+    let total = 0;
+    for (let guard = 0; guard < 100; guard++) {
+      const snap = await db.collectionGroup(groupName).limit(400).get();
+      if (snap.empty) break;
+      const batch = db.batch();
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+      total += snap.size;
+      logm("  · collectionGroup/" + groupName + " 本批 ×" + snap.size);
+      if (snap.size < 400) break;
+    }
+    return total;
+  }
+
+  logm("以 collectionGroup 清除所有成績子集合（含孤兒路徑 S3A-04 等）…");
+  for (const sub of ["pastpapers", "homeworks", "quizzes", "exams"]) {
+    try {
+      const n = await deleteByCollectionGroup(sub);
+      logm("✓ " + sub + " 共刪 " + n);
+    } catch (e) {
+      logm("⚠ collectionGroup " + sub + "：" + (e.message || e));
+      logm("  （若提示 index，請到 Firebase 依連結建立 collection group 索引後再清一次）");
+    }
+  }
+
+  logm("清除 scores 根文件…");
+  let scoreRootCount = 0;
+  for (let round = 0; round < 30; round++) {
     const scoreRoots = await db.collection("scores").limit(100).get();
     if (scoreRoots.empty) break;
-    for (const root of scoreRoots.docs) {
-      for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
-        // 子集合可能很多，分批刪
-        for (let guard = 0; guard < 50; guard++) {
-          const snap = await root.ref.collection(sub).limit(400).get();
-          if (snap.empty) break;
-          const batch = db.batch();
-          snap.docs.forEach(d => batch.delete(d.ref));
-          await batch.commit();
-          scoreDocCount += snap.size;
-          logm("  · 刪 " + root.id + "/" + sub + " ×" + snap.size);
-          if (snap.size < 400) break;
-        }
-      }
-      try { await root.ref.delete(); scoreRootCount++; } catch (e) {
-        logm("  ⚠ 刪 scores 根 " + root.id + "：" + (e.message || e));
-      }
-    }
+    const batch = db.batch();
+    scoreRoots.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+    scoreRootCount += scoreRoots.size;
     if (scoreRoots.size < 100) break;
   }
-  logm("✓ scores（根 " + scoreRootCount + "，子文件 " + scoreDocCount + "）");
+  logm("✓ scores 根 ×" + scoreRootCount);
 
-  // 2) scoreSummary
   logm("清除 scoreSummary…");
   try {
     const sumN = await clearCollectionDocs("scoreSummary");
     logm("✓ scoreSummary (" + sumN + ")");
   } catch (e) { logm("⚠ scoreSummary：" + (e.message || e)); }
 
-  // 3) 記憶體快取
   try {
     if (typeof __scoreDocCache !== "undefined") __scoreDocCache.clear();
     if (typeof __summaryCache !== "undefined") __summaryCache.clear();
     logm("✓ 已清空記憶體 cache");
   } catch (e) {}
 
-  // 4) 其餘集合
   const cols = [
     "students",
     "homeworkMaps", "quizMaps", "examMaps", "pastpaperMaps",
@@ -854,31 +864,20 @@ async function clearAllFirestoreData(logm) {
     }
   }
 
-  // 5) 驗證：pastpapers 是否仍有殘留
+  // 驗證 collectionGroup
   logm("驗證殘留…");
-  const leftRoots = await db.collection("scores").limit(5).get();
-  if (!leftRoots.empty) {
-    logm("⚠ scores 仍有 " + leftRoots.size + "+ 根文件，再清一次…");
-    for (const root of leftRoots.docs) {
-      for (const sub of ["homeworks", "quizzes", "exams", "pastpapers"]) {
-        const snap = await root.ref.collection(sub).get();
-        for (const d of snap.docs) await d.ref.delete();
-      }
-      await root.ref.delete();
+  let left = 0;
+  for (const sub of ["pastpapers", "homeworks", "quizzes", "exams"]) {
+    try {
+      const snap = await db.collectionGroup(sub).limit(3).get();
+      left += snap.size;
+      if (snap.size) logm("⚠ 仍有 " + sub + " 例如 " + snap.docs[0].ref.path);
+    } catch (e) {
+      logm("⚠ 驗證 " + sub + "：" + (e.message || e));
     }
   }
-  // 抽樣：若仍有任何 pastpapers 子文件
-  let leftoverPp = 0;
-  const checkRoots = await db.collection("scores").limit(20).get();
-  for (const root of checkRoots.docs) {
-    const pp = await root.ref.collection("pastpapers").limit(5).get();
-    leftoverPp += pp.size;
-  }
-  if (leftoverPp > 0) {
-    logm("⚠ 仍偵測到 pastpapers 殘留 " + leftoverPp + " 份，請檢查 Firestore 規則是否允許 delete");
-  } else {
-    logm("✓ 驗證：scores/pastpapers 無殘留（抽樣）");
-  }
+  if (!left) logm("✓ 驗證：成績子集合無殘留（抽樣）");
+  else logm("⚠ 仍有殘留，請看上方路徑或索引錯誤後再清");
   logm("全部清除流程結束");
 }
 
@@ -1006,18 +1005,26 @@ function ImportView({ onReload }) {
     const commit = async () => { if (!ops) return; await batch.commit(); batch = db.batch(); ops = 0; };
     const students = Array.isArray(payload.students) ? payload.students : [];
     logm(`學生 ${students.length}…`);
+    // Sheet 舊 key（S4A-3）→ 正規 sid（s23070012）；成績一律寫到 sid 下
+    const idToSid = {};
     for (const s of students) {
-      if (!s?.id) continue;
-      const id = String(s.id);
-      batch.set(db.collection("students").doc(id), {
-        id, sid: s.sid||id, class: s.class||"", num: s.num??"", name: s.name||"",
+      if (!s?.id && !s?.sid) continue;
+      const legacyId = String(s.id || s.sid);
+      const realSid = String(s.sid || s.id);
+      idToSid[legacyId] = realSid;
+      idToSid[realSid] = realSid;
+      batch.set(db.collection("students").doc(realSid), {
+        id: realSid,
+        sid: realSid,
+        legacyId,
+        class: s.class||"", num: s.num??"", name: s.name||"",
         cohort: s.cohort||"", pin: (s.pin!=null && s.pin!=="") ? s.pin : "", active: s.active!==false,
         updatedAt: new Date().toISOString()
       }, { merge: true });
       ops++; if (ops>=400) await commit();
     }
     await commit();
-    logm("✓ 學生");
+    logm("✓ 學生（以 sid 為文件 ID）");
 
     const writeMaps = async (col, obj) => {
       const data = obj||{};
@@ -1038,11 +1045,12 @@ function ImportView({ onReload }) {
     const writeScores = async (tree, sub) => {
       const root = tree||{};
       logm(`${sub}…`);
-      for (const sid of Object.keys(root)) {
-        for (const pid of Object.keys(root[sid]||{})) {
-          const val = root[sid][pid];
+      for (const key of Object.keys(root)) {
+        const scoreSid = idToSid[key] || key;
+        for (const pid of Object.keys(root[key]||{})) {
+          const val = root[key][pid];
           const doc = (val && typeof val==="object" && !Array.isArray(val)) ? { ...val } : { value: val };
-          batch.set(db.collection("scores").doc(sid).collection(sub).doc(String(pid)), { ...doc, updatedAt: new Date().toISOString() }, { merge:true });
+          batch.set(db.collection("scores").doc(scoreSid).collection(sub).doc(String(pid)), { ...doc, updatedAt: new Date().toISOString() }, { merge:true });
           ops++; if (ops>=400) await commit();
         }
       }
