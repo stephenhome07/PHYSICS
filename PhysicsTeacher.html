@@ -3140,22 +3140,18 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
   const [aiLevel, setAiLevel] = useState("中");
   const [aiExtra, setAiExtra] = useState({ practice: true, explainImg: false, ppt: false, notes: false });
   const [selectedQuizzes, setSelectedQuizzes] = useState([]);
+  const [taughtSet, setTaughtSet] = useState(new Set()); // 全班已有人作答的小測
 
   const cohortQuizIds = useMemo(
     () => Object.keys(quizMaps || {}).filter(id => quizVisibleForCohort(quizMaps[id], currentCohort)).sort(),
     [quizMaps, currentCohort]
-  );
-  const [taughtSet, setTaughtSet] = useState(null); // null=載入中
-  const visibleQuizzes = useMemo(
-    () => (taughtSet ? cohortQuizIds.filter(id => taughtSet.has(String(id))) : []),
-    [cohortQuizIds, taughtSet]
   );
 
   useEffect(() => {
     if (activeStudents.length && !activeStudents.find(s => s.id === sid)) setSid(activeStudents[0].id);
   }, [activeStudents]);
 
-  // 全班無人有分的小測（未教）不顯示
+  // 掃描本群組：哪些小測「至少一人有真正作答」
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -3163,30 +3159,38 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
         if (!cancelled) setTaughtSet(new Set());
         return;
       }
-      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds, quizMaps);
-      if (!cancelled) setTaughtSet(has);
+      setLoading(true);
+      try {
+        const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds, quizMaps);
+        if (!cancelled) setTaughtSet(has);
+      } catch (e) { console.warn(e); if (!cancelled) setTaughtSet(new Set()); }
+      if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [cohortQuizIds.join("|"), activeStudents.map(s => s.id).join(",")]);
+  }, [cohortQuizIds.join("|"), activeStudents.map(s => s.id).join(","), currentCohort]);
 
   useEffect(() => {
     if (!sid) return;
     let cancelled = false;
     (async () => {
-      setLoading(true);
       const data = await loadAllQuizScoresForStudent(sid);
-      if (!cancelled) {
-        setScores(data);
-        const withScore = visibleQuizzes.filter(qid => quizRecordHasScore(data[qid]));
-        setSelectedQuizzes(withScore.length ? withScore : visibleQuizzes.slice());
-        setLoading(false);
-      }
+      if (!cancelled) setScores(data || {});
     })();
     return () => { cancelled = true; };
-  }, [sid, visibleQuizzes.join("|")]);
+  }, [sid]);
+
+  // 只顯示：全班已教（有人作答）的小測
+  const visibleQuizzes = useMemo(() => {
+    return cohortQuizIds.filter(id => taughtSet.has(String(id)));
+  }, [cohortQuizIds, taughtSet]);
+
+  // 預設勾選：此生有分的；若無則全選已教卷
+  useEffect(() => {
+    const withScore = visibleQuizzes.filter(qid => quizRecordHasScore(scores[qid], quizMaps[qid]));
+    setSelectedQuizzes(withScore.length ? withScore : visibleQuizzes.slice());
+  }, [visibleQuizzes.join("|"), sid, Object.keys(scores).join("|")]);
 
   const rows = useMemo(() => {
-    // 只顯示全班已有人作答的小測（visibleQuizzes 已按 taughtSet 過濾）
     return visibleQuizzes.map(qid => {
       const map = quizMaps[qid];
       const rec = scores[qid];
@@ -3373,8 +3377,11 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
           {activeStudents.map(s => <option key={s.id} value={s.id}>{s.class}-{s.num} {s.name}</option>)}
         </select>
         {loading && <span className="text-xs text-slate-400">載入中…</span>}
-        {taughtSet && !visibleQuizzes.length && !loading && (
+        {!loading && taughtSet && taughtSet.size === 0 && (
           <span className="text-xs text-amber-700 font-bold">本群組尚無「已有人作答」的小測可顯示</span>
+        )}
+        {!loading && taughtSet && taughtSet.size > 0 && (
+          <span className="text-xs text-slate-500">已教 {taughtSet.size} 份小測</span>
         )}
       </div>
 
@@ -3501,54 +3508,44 @@ function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
     () => Object.keys(quizMaps || {}).filter(id => quizVisibleForCohort(quizMaps[id], currentCohort)).sort(),
     [quizMaps, currentCohort]
   );
-  const [taughtSet, setTaughtSet] = useState(null);
-  const available = useMemo(
-    () => (taughtSet ? cohortQuizIds.filter(id => taughtSet.has(String(id))) : []),
-    [cohortQuizIds, taughtSet]
-  );
+  const [taughtList, setTaughtList] = useState([]); // 有人作答的小測 id 列表
   const [included, setIncluded] = useState({});
   const [scores, setScores] = useState({}); // sid -> { quizId -> record }
   const [loading, setLoading] = useState(false);
+  const [scanDone, setScanDone] = useState(false);
 
+  // 先掃描本群組哪些小測有人作答 → 只這些出現在 checkbox
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setScanDone(false);
       if (!activeStudents.length || !cohortQuizIds.length) {
-        if (!cancelled) setTaughtSet(new Set());
+        if (!cancelled) { setTaughtList([]); setScanDone(true); }
         return;
       }
       setLoading(true);
-      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds, quizMaps);
-      if (!cancelled) {
-        setTaughtSet(has);
-        setLoading(false);
+      try {
+        const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds, quizMaps);
+        const list = cohortQuizIds.filter(id => has.has(String(id)));
+        if (!cancelled) {
+          setTaughtList(list);
+          setIncluded(prev => {
+            const next = {};
+            list.forEach(id => { next[id] = prev[id] !== undefined ? prev[id] : true; });
+            return next;
+          });
+        }
+      } catch (e) {
+        console.warn(e);
+        if (!cancelled) setTaughtList([]);
       }
+      if (!cancelled) { setLoading(false); setScanDone(true); }
     })();
     return () => { cancelled = true; };
-  }, [cohortQuizIds.join("|"), activeStudents.map(s => s.id).join(",")]);
+  }, [cohortQuizIds.join("|"), activeStudents.map(s => s.id).join(","), currentCohort]);
 
-  useEffect(() => {
-    setIncluded(prev => {
-      const next = {};
-      available.forEach(id => { next[id] = prev[id] !== undefined ? prev[id] : true; });
-      return next;
-    });
-  }, [available.join("|")]);
-
-  const selectedIdsRaw = useMemo(() => available.filter(id => included[id]), [available, included]);
-
-  // 雙重保險：載入後若整欄全班皆無分，亦不顯示該卷 checkbox（防止誤判 taught）
-  const availableLive = useMemo(() => {
-    if (!Object.keys(scores || {}).length) return available;
-    return available.filter(qid => activeStudents.some(s => {
-      const rec = scores[s.id]?.[qid];
-      return quizRecordHasScore(rec, quizMaps[qid]);
-    }));
-  }, [available, scores, activeStudents, quizMaps]);
-  const selectedIds = useMemo(
-    () => availableLive.filter(id => included[id] !== false && selectedIdsRaw.includes(id)),
-    [availableLive, included, selectedIdsRaw]
-  );
+  const available = taughtList;
+  const selectedIds = useMemo(() => available.filter(id => included[id]), [available, included]);
 
   // 懶載入：只拉有勾選的小測
   useEffect(() => {
@@ -3663,14 +3660,17 @@ function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
         </div>
       </div>
       <div className="flex flex-wrap gap-2">
-        {(availableLive.length ? availableLive : available).map(id => (
+        {available.map(id => (
           <label key={id} className={`text-sm font-bold flex items-center gap-1.5 border-2 rounded-lg px-3 py-1.5 cursor-pointer ${included[id]?"border-indigo-400 bg-indigo-50":"border-slate-200"}`}>
             <input type="checkbox" checked={!!included[id]} onChange={() => setIncluded(p => ({ ...p, [id]: !p[id] }))} />
             {id}
             <span className="text-xs font-normal text-slate-400">/{quizMax[id]}</span>
           </label>
         ))}
-        {!available.length && !loading && <span className="text-slate-400 text-sm">此群組尚無「已有人作答」的小測（未教的不會顯示）</span>}
+        {scanDone && !available.length && !loading && (
+          <span className="text-slate-400 text-sm">此群組尚無「已有人作答」的小測（未教的不會顯示）</span>
+        )}
+        {!scanDone && <span className="text-slate-400 text-sm">正在檢查哪些小測已有成績…</span>}
       </div>
       <div className="overflow-auto max-h-[70vh]">
         <table className="min-w-full text-sm">
