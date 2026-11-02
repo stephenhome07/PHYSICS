@@ -406,38 +406,35 @@ async function loadQuizScoresForQuiz(studentIds, quizId) {
   return out;
 }
 
-async function quizRecordHasScore(rec, map) {
+function quizRecordHasScore(rec, map) {
   if (!rec || typeof rec !== "object") return false;
-  // 優先：對照題庫是否有任何一題非空作答
-  const qs = map && map.questions;
-  if (qs && qs.length) {
-    return qs.some(q => {
-      const raw = rec[q.id];
-      return raw !== undefined && raw !== null && String(raw).trim() !== "";
-    });
+  const qs = map && Array.isArray(map.questions) ? map.questions : null;
+  // 必須有題庫且至少一題有非空作答（與分數表 scoreOf 同一標準）
+  if (!qs || !qs.length) return false;
+  for (let i = 0; i < qs.length; i++) {
+    const raw = rec[qs[i].id];
+    if (raw === undefined || raw === null || String(raw).trim() === "") continue;
+    return true;
   }
-  return Object.keys(rec).some(k => !["updatedAt", "_id", "value", "remakeStatus", "remakeDate", "remarks"].includes(k) && rec[k] !== "" && rec[k] != null);
+  return false;
 }
 
-/** 全班至少一人有「真正作答」的小測（未教／未測不顯示） */
+/** 全班至少一人有真正作答的小測（用每人 quizzes 子集合一次讀完，避免誤判） */
 async function findQuizzesWithClassScores(studentIds, quizIds, quizMaps) {
   const has = new Set();
   if (!studentIds?.length || !quizIds?.length) return has;
-  const chunk = 25;
-  for (const qid of quizIds) {
-    const map = quizMaps ? quizMaps[qid] : null;
-    let hit = false;
-    for (let i = 0; i < studentIds.length && !hit; i += chunk) {
-      const slice = studentIds.slice(i, i + chunk);
-      await Promise.all(slice.map(async sid => {
-        if (hit) return;
-        try {
-          const data = await getScoreDocCached(sid, "quizzes", qid, true);
-          if (quizRecordHasScore(data, map)) hit = true;
-        } catch (e) {}
-      }));
-    }
-    if (hit) has.add(String(qid));
+  const want = {};
+  quizIds.forEach(id => { want[String(id)] = true; });
+  for (const sid of studentIds) {
+    try {
+      const data = await loadAllQuizScoresForStudent(sid);
+      Object.keys(data || {}).forEach(qid => {
+        if (!want[String(qid)]) return;
+        if (quizRecordHasScore(data[qid], quizMaps ? quizMaps[qid] : null)) {
+          has.add(String(qid));
+        }
+      });
+    } catch (e) { console.warn(e); }
   }
   return has;
 }
@@ -3179,16 +3176,16 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
     return () => { cancelled = true; };
   }, [sid]);
 
-  // 只顯示：全班已教（有人作答）的小測
+  // 個人分析：只顯示「此生有真正作答」的小測（未測／未教不進圖表、一覽、Prompt）
+  // 全班已教列表 taughtSet 另用於提示
   const visibleQuizzes = useMemo(() => {
-    return cohortQuizIds.filter(id => taughtSet.has(String(id)));
-  }, [cohortQuizIds, taughtSet]);
+    return cohortQuizIds.filter(id => quizRecordHasScore(scores[id], quizMaps[id]));
+  }, [cohortQuizIds, scores, quizMaps]);
 
-  // 預設勾選：此生有分的；若無則全選已教卷
+  // 預設勾選全部有分卷
   useEffect(() => {
-    const withScore = visibleQuizzes.filter(qid => quizRecordHasScore(scores[qid], quizMaps[qid]));
-    setSelectedQuizzes(withScore.length ? withScore : visibleQuizzes.slice());
-  }, [visibleQuizzes.join("|"), sid, Object.keys(scores).join("|")]);
+    setSelectedQuizzes(visibleQuizzes.slice());
+  }, [visibleQuizzes.join("|"), sid]);
 
   const rows = useMemo(() => {
     return visibleQuizzes.map(qid => {
@@ -3377,11 +3374,11 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
           {activeStudents.map(s => <option key={s.id} value={s.id}>{s.class}-{s.num} {s.name}</option>)}
         </select>
         {loading && <span className="text-xs text-slate-400">載入中…</span>}
-        {!loading && taughtSet && taughtSet.size === 0 && (
-          <span className="text-xs text-amber-700 font-bold">本群組尚無「已有人作答」的小測可顯示</span>
-        )}
-        {!loading && taughtSet && taughtSet.size > 0 && (
-          <span className="text-xs text-slate-500">已教 {taughtSet.size} 份小測</span>
+        {!loading && (
+          <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded">
+            此生 {visibleQuizzes.length} 份有分
+            {taughtSet && taughtSet.size > 0 ? ` · 全班已測 ${taughtSet.size}` : ""}
+          </span>
         )}
       </div>
 
