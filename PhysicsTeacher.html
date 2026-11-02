@@ -5,7 +5,7 @@
 <meta name="viewport" content="S尸width=device-width, initial-scale=1.0"/>
 <title>Physics Teacher · Firebase</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com 18.2.0/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.9/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
@@ -406,21 +406,38 @@ async function loadQuizScoresForQuiz(studentIds, quizId) {
   return out;
 }
 
-async function quizRecordHasScore(rec) {
+async function quizRecordHasScore(rec, map) {
   if (!rec || typeof rec !== "object") return false;
-  return Object.keys(rec).some(k => !["updatedAt", "_id", "value"].includes(k) && rec[k] !== "" && rec[k] != null);
+  // 優先：對照題庫是否有任何一題非空作答
+  const qs = map && map.questions;
+  if (qs && qs.length) {
+    return qs.some(q => {
+      const raw = rec[q.id];
+      return raw !== undefined && raw !== null && String(raw).trim() !== "";
+    });
+  }
+  return Object.keys(rec).some(k => !["updatedAt", "_id", "value", "remakeStatus", "remakeDate", "remarks"].includes(k) && rec[k] !== "" && rec[k] != null);
 }
 
-/** 全班至少一人有分的小測（未教／未測的不顯示） */
-async function findQuizzesWithClassScores(studentIds, quizIds) {
+/** 全班至少一人有「真正作答」的小測（未教／未測不顯示） */
+async function findQuizzesWithClassScores(studentIds, quizIds, quizMaps) {
   const has = new Set();
   if (!studentIds?.length || !quizIds?.length) return has;
+  const chunk = 25;
   for (const qid of quizIds) {
-    try {
-      const part = await loadQuizScoresForQuiz(studentIds, qid);
-      const hit = studentIds.some(sid => quizRecordHasScore(part[sid]?.[qid]));
-      if (hit) has.add(String(qid));
-    } catch (e) { console.warn(e); }
+    const map = quizMaps ? quizMaps[qid] : null;
+    let hit = false;
+    for (let i = 0; i < studentIds.length && !hit; i += chunk) {
+      const slice = studentIds.slice(i, i + chunk);
+      await Promise.all(slice.map(async sid => {
+        if (hit) return;
+        try {
+          const data = await getScoreDocCached(sid, "quizzes", qid, true);
+          if (quizRecordHasScore(data, map)) hit = true;
+        } catch (e) {}
+      }));
+    }
+    if (hit) has.add(String(qid));
   }
   return has;
 }
@@ -3146,7 +3163,7 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
         if (!cancelled) setTaughtSet(new Set());
         return;
       }
-      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds);
+      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds, quizMaps);
       if (!cancelled) setTaughtSet(has);
     })();
     return () => { cancelled = true; };
@@ -3169,6 +3186,7 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
   }, [sid, visibleQuizzes.join("|")]);
 
   const rows = useMemo(() => {
+    // 只顯示全班已有人作答的小測（visibleQuizzes 已按 taughtSet 過濾）
     return visibleQuizzes.map(qid => {
       const map = quizMaps[qid];
       const rec = scores[qid];
@@ -3355,6 +3373,9 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
           {activeStudents.map(s => <option key={s.id} value={s.id}>{s.class}-{s.num} {s.name}</option>)}
         </select>
         {loading && <span className="text-xs text-slate-400">載入中…</span>}
+        {taughtSet && !visibleQuizzes.length && !loading && (
+          <span className="text-xs text-amber-700 font-bold">本群組尚無「已有人作答」的小測可顯示</span>
+        )}
       </div>
 
       <div className="grid lg:grid-cols-5 gap-4">
@@ -3497,7 +3518,7 @@ function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
         return;
       }
       setLoading(true);
-      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds);
+      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds, quizMaps);
       if (!cancelled) {
         setTaughtSet(has);
         setLoading(false);
@@ -3514,7 +3535,20 @@ function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
     });
   }, [available.join("|")]);
 
-  const selectedIds = useMemo(() => available.filter(id => included[id]), [available, included]);
+  const selectedIdsRaw = useMemo(() => available.filter(id => included[id]), [available, included]);
+
+  // 雙重保險：載入後若整欄全班皆無分，亦不顯示該卷 checkbox（防止誤判 taught）
+  const availableLive = useMemo(() => {
+    if (!Object.keys(scores || {}).length) return available;
+    return available.filter(qid => activeStudents.some(s => {
+      const rec = scores[s.id]?.[qid];
+      return quizRecordHasScore(rec, quizMaps[qid]);
+    }));
+  }, [available, scores, activeStudents, quizMaps]);
+  const selectedIds = useMemo(
+    () => availableLive.filter(id => included[id] !== false && selectedIdsRaw.includes(id)),
+    [availableLive, included, selectedIdsRaw]
+  );
 
   // 懶載入：只拉有勾選的小測
   useEffect(() => {
@@ -3629,14 +3663,14 @@ function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
         </div>
       </div>
       <div className="flex flex-wrap gap-2">
-        {available.map(id => (
+        {(availableLive.length ? availableLive : available).map(id => (
           <label key={id} className={`text-sm font-bold flex items-center gap-1.5 border-2 rounded-lg px-3 py-1.5 cursor-pointer ${included[id]?"border-indigo-400 bg-indigo-50":"border-slate-200"}`}>
             <input type="checkbox" checked={!!included[id]} onChange={() => setIncluded(p => ({ ...p, [id]: !p[id] }))} />
             {id}
             <span className="text-xs font-normal text-slate-400">/{quizMax[id]}</span>
           </label>
         ))}
-        {!available.length && <span className="text-slate-400 text-sm">此群組尚無小測藍圖</span>}
+        {!available.length && !loading && <span className="text-slate-400 text-sm">此群組尚無「已有人作答」的小測（未教的不會顯示）</span>}
       </div>
       <div className="overflow-auto max-h-[70vh]">
         <table className="min-w-full text-sm">
