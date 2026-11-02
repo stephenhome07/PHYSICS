@@ -156,7 +156,31 @@ async function loadMakeupCollection(col) {
   return out;
 }
 const __summaryCache = new Map();
+function quizRecHasAnyScore(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  return Object.keys(rec).some(k => !["updatedAt", "_id", "value"].includes(k) && rec[k] !== "" && rec[k] != null);
+}
+
+/** 群組內至少一人有分的小測 ID（未教的不顯示；自己缺席仍顯示未測） */
+async function loadTaughtQuizIds(studentIds, quizIds) {
+  const taught = new Set();
+  if (!studentIds?.length || !quizIds?.length) return taught;
+  for (const qid of quizIds) {
+    for (const sid of studentIds) {
+      try {
+        const snap = await db.collection("scores").doc(sid).collection("quizzes").doc(String(qid)).get();
+        if (snap.exists && quizRecHasAnyScore(snap.data())) {
+          taught.add(String(qid));
+          break;
+        }
+      } catch (e) {}
+    }
+  }
+  return taught;
+}
+
 async function loadScoreSummaries(studentIds) {
+
   const out = {};
   const need = [];
   studentIds.forEach(sid => {
@@ -436,7 +460,7 @@ function LoginView({ onLogin }) {
 }
 
 // ---------- Home Dashboard ----------
-function HomeDashboard({ student, maps, scores, makeup, cohortPeers, peerScores }) {
+function HomeDashboard({ student, maps, scores, makeup, taughtQuizzes, cohortPeers, peerScores }) {
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
 
@@ -572,13 +596,20 @@ function HomeDashboard({ student, maps, scores, makeup, cohortPeers, peerScores 
     const rows = [];
     Object.entries(maps.quiz || {}).forEach(([id, m]) => {
       if (!mapVisible(m, cohort)) return;
+      // 全班未測（未教）不顯示；有教但自己無分仍顯示
+      if (taughtQuizzes && !taughtQuizzes.has(String(id))) return;
       const sc = scoreOfRec(m, scores.quizzes?.[id]);
-      if (!sc) return;
-      rows.push({ id, title: m.title || id, pct: Math.round(sc.pct * 100), earned: sc.earned, max: sc.max });
+      rows.push({
+        id, title: m.title || id,
+        pct: sc ? Math.round(sc.pct * 100) : null,
+        earned: sc ? sc.earned : null,
+        max: sc ? sc.max : null,
+        missing: !sc
+      });
     });
     rows.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
     return rows;
-  }, [maps.quiz, scores.quizzes, cohort]);
+  }, [maps.quiz, scores.quizzes, cohort, taughtQuizzes]);
 
   // 我的補測（quizMakeup 中有我）
   const myQuizMakeup = useMemo(() => {
@@ -894,11 +925,13 @@ function HomeDashboard({ student, maps, scores, makeup, cohortPeers, peerScores 
                   <div key={q.id}>
                     <div className="flex justify-between text-[11px] font-bold mb-0.5">
                       <span className="text-slate-600 truncate mr-2">{q.title}</span>
-                      <span className={q.pct >= 60 ? "text-emerald-600" : "text-rose-600"}>{q.pct}%</span>
+                      <span className={q.missing ? "text-slate-400" : q.pct >= 60 ? "text-emerald-600" : "text-rose-600"}>
+                        {q.missing ? "未測" : q.pct + "%"}
+                      </span>
                     </div>
                     <div className="h-2.5 rounded-full bg-slate-100 overflow-hidden">
-                      <div className={`h-full rounded-full ${q.pct >= 70 ? "bg-emerald-500" : q.pct >= 50 ? "bg-amber-400" : "bg-rose-400"}`}
-                        style={{ width: Math.min(100, q.pct) + "%" }} />
+                      <div className={`h-full rounded-full ${q.missing ? "bg-slate-200" : q.pct >= 70 ? "bg-emerald-500" : q.pct >= 50 ? "bg-amber-400" : "bg-rose-400"}`}
+                        style={{ width: (q.missing ? 0 : Math.min(100, q.pct)) + "%" }} />
                     </div>
                   </div>
                 ))}
@@ -969,7 +1002,7 @@ function HomeDashboard({ student, maps, scores, makeup, cohortPeers, peerScores 
 }
 
 
-function SchoolProgressView({ student, maps, scores, makeup, onGoAi }) {
+function SchoolProgressView({ student, maps, scores, makeup, taughtQuizzes, onGoAi }) {
   const cohort = student.cohort || "";
   const [section, setSection] = useState("hw"); // hw | quiz | exam
 
@@ -997,6 +1030,8 @@ function SchoolProgressView({ student, maps, scores, makeup, onGoAi }) {
     const rows = [];
     Object.entries(maps.quiz || {}).forEach(([id, m]) => {
       if (!mapVisible(m, cohort)) return;
+      // 全班未測不顯示；班上有人有分而自己無分 → 仍顯示「未測／無分」
+      if (taughtQuizzes && !taughtQuizzes.has(String(id))) return;
       const sc = scoreOfRec(m, scores.quizzes?.[id]);
       const mk = makeup?.quiz?.[id]?.[student.id];
       rows.push({
@@ -1008,7 +1043,7 @@ function SchoolProgressView({ student, maps, scores, makeup, onGoAi }) {
     });
     rows.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
     return rows;
-  }, [maps.quiz, scores.quizzes, makeup, cohort, student.id]);
+  }, [maps.quiz, scores.quizzes, makeup, cohort, student.id, taughtQuizzes]);
 
   const examRows = useMemo(() => {
     const rows = [];
@@ -2154,6 +2189,7 @@ function StudentShell({ student, onLogout }) {
   const [maps, setMaps] = useState({ homework: {}, quiz: {}, exam: {}, pastpaper: {} });
   const [scores, setScores] = useState({ homeworks: {}, quizzes: {}, exams: {}, pastpapers: {} });
   const [makeup, setMakeup] = useState({ quiz: {}, exam: {} });
+  const [taughtQuizzes, setTaughtQuizzes] = useState(null); // Set of quiz ids taught in cohort
   const [cohortPeers, setCohortPeers] = useState([]);
   const [peerScores, setPeerScores] = useState(null);
 
@@ -2181,6 +2217,23 @@ function StudentShell({ student, onLogout }) {
         setMaps({ homework: hw, quiz, exam, pastpaper: pp });
         setScores({ homeworks: hws, quizzes: qzs, exams: exs, pastpapers: pps });
         setMakeup({ quiz: qMk, exam: eMk });
+        // 全班已測小測（自己+同群組）
+        try {
+          const allStu = await loadAllStudents();
+          const peers = allStu.filter(s => s.cohort && s.cohort === student.cohort).map(s => s.id);
+          const ids = peers.length ? peers : [student.id];
+          const qids = Object.keys(quiz || {}).filter(id => {
+            const m = quiz[id];
+            if (!m) return false;
+            if (!m.cohort || m.cohort === "" || m.cohort === "所有學生") return true;
+            return m.cohort === student.cohort;
+          });
+          const taught = await loadTaughtQuizIds(ids, qids);
+          if (!cancelled) setTaughtQuizzes(taught);
+        } catch (e) {
+          console.warn(e);
+          if (!cancelled) setTaughtQuizzes(new Set());
+        }
 
         // cohort peers for ranking (lightweight overall)
         const all = await loadAllStudents();
@@ -2231,10 +2284,10 @@ function StudentShell({ student, onLogout }) {
       <main className="max-w-5xl mx-auto px-4 py-6 bg-[#f8fafc] min-h-[70vh]">
         {loading && <div className="text-center text-slate-400 py-16">載入你的數據…</div>}
         {!loading && tab === "home" && (
-          <HomeDashboard student={student} maps={maps} scores={scores} makeup={makeup} cohortPeers={cohortPeers} peerScores={peerScores} />
+          <HomeDashboard student={student} maps={maps} scores={scores} makeup={makeup} taughtQuizzes={taughtQuizzes} cohortPeers={cohortPeers} peerScores={peerScores} />
         )}
         {!loading && tab === "school" && (
-          <SchoolProgressView student={student} maps={maps} scores={scores} makeup={makeup}
+          <SchoolProgressView student={student} maps={maps} scores={scores} makeup={makeup} taughtQuizzes={taughtQuizzes}
             onGoAi={(src) => { setAiSource(src || "hw"); setTab("ai"); }} />
         )}
         {!loading && tab === "pp" && (
