@@ -406,7 +406,27 @@ async function loadQuizScoresForQuiz(studentIds, quizId) {
   return out;
 }
 
+async function quizRecordHasScore(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  return Object.keys(rec).some(k => !["updatedAt", "_id", "value"].includes(k) && rec[k] !== "" && rec[k] != null);
+}
+
+/** 全班至少一人有分的小測（未教／未測的不顯示） */
+async function findQuizzesWithClassScores(studentIds, quizIds) {
+  const has = new Set();
+  if (!studentIds?.length || !quizIds?.length) return has;
+  for (const qid of quizIds) {
+    try {
+      const part = await loadQuizScoresForQuiz(studentIds, qid);
+      const hit = studentIds.some(sid => quizRecordHasScore(part[sid]?.[qid]));
+      if (hit) has.add(String(qid));
+    } catch (e) { console.warn(e); }
+  }
+  return has;
+}
+
 async function loadQuizMakeup(quizId) {
+
   const snap = await db.collection("quizMakeup").doc(String(quizId)).get();
   return snap.exists ? (snap.data().students || {}) : {};
 }
@@ -3104,14 +3124,33 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
   const [aiExtra, setAiExtra] = useState({ practice: true, explainImg: false, ppt: false, notes: false });
   const [selectedQuizzes, setSelectedQuizzes] = useState([]);
 
-  const visibleQuizzes = useMemo(
+  const cohortQuizIds = useMemo(
     () => Object.keys(quizMaps || {}).filter(id => quizVisibleForCohort(quizMaps[id], currentCohort)).sort(),
     [quizMaps, currentCohort]
+  );
+  const [taughtSet, setTaughtSet] = useState(null); // null=載入中
+  const visibleQuizzes = useMemo(
+    () => (taughtSet ? cohortQuizIds.filter(id => taughtSet.has(String(id))) : []),
+    [cohortQuizIds, taughtSet]
   );
 
   useEffect(() => {
     if (activeStudents.length && !activeStudents.find(s => s.id === sid)) setSid(activeStudents[0].id);
   }, [activeStudents]);
+
+  // 全班無人有分的小測（未教）不顯示
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!activeStudents.length || !cohortQuizIds.length) {
+        if (!cancelled) setTaughtSet(new Set());
+        return;
+      }
+      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds);
+      if (!cancelled) setTaughtSet(has);
+    })();
+    return () => { cancelled = true; };
+  }, [cohortQuizIds.join("|"), activeStudents.map(s => s.id).join(",")]);
 
   useEffect(() => {
     if (!sid) return;
@@ -3121,11 +3160,7 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
       const data = await loadAllQuizScoresForStudent(sid);
       if (!cancelled) {
         setScores(data);
-        // 預設勾選有成績的小測
-        const withScore = visibleQuizzes.filter(qid => {
-          const rec = data[qid];
-          return rec && Object.keys(rec).some(k => !["updatedAt","_id"].includes(k) && rec[k] !== "" && rec[k] != null);
-        });
+        const withScore = visibleQuizzes.filter(qid => quizRecordHasScore(data[qid]));
         setSelectedQuizzes(withScore.length ? withScore : visibleQuizzes.slice());
         setLoading(false);
       }
@@ -3441,18 +3476,37 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
 
 
 function QuizSummaryView({ activeStudents, quizMaps, currentCohort }) {
-  const available = useMemo(
+  const cohortQuizIds = useMemo(
     () => Object.keys(quizMaps || {}).filter(id => quizVisibleForCohort(quizMaps[id], currentCohort)).sort(),
     [quizMaps, currentCohort]
+  );
+  const [taughtSet, setTaughtSet] = useState(null);
+  const available = useMemo(
+    () => (taughtSet ? cohortQuizIds.filter(id => taughtSet.has(String(id))) : []),
+    [cohortQuizIds, taughtSet]
   );
   const [included, setIncluded] = useState({});
   const [scores, setScores] = useState({}); // sid -> { quizId -> record }
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const o = {};
-    available.forEach(id => { o[id] = included[id] !== false; });
-    // keep previous toggles when possible
+    let cancelled = false;
+    (async () => {
+      if (!activeStudents.length || !cohortQuizIds.length) {
+        if (!cancelled) setTaughtSet(new Set());
+        return;
+      }
+      setLoading(true);
+      const has = await findQuizzesWithClassScores(activeStudents.map(s => s.id), cohortQuizIds);
+      if (!cancelled) {
+        setTaughtSet(has);
+        setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [cohortQuizIds.join("|"), activeStudents.map(s => s.id).join(",")]);
+
+  useEffect(() => {
     setIncluded(prev => {
       const next = {};
       available.forEach(id => { next[id] = prev[id] !== undefined ? prev[id] : true; });
