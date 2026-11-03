@@ -752,12 +752,33 @@ async function deleteQuizScore(studentId, quizId) {
   await db.collection("scores").doc(studentId).collection("quizzes").doc(String(quizId)).delete();
 }
 
+/** MC 正解列表：支援 "B,D" / "B/D" / "B 或 D" / "BD" */
+function parseMcAnswerKey(ans) {
+  if (ans == null || String(ans).trim() === "") return [];
+  let s = String(ans).toUpperCase().trim();
+  s = s.replace(/或/g, ",").replace(/[\/|、；;]/g, ",");
+  let parts = s.split(",").map(x => x.trim()).filter(Boolean);
+  if (parts.length === 1 && /^[A-D]{2,4}$/.test(parts[0])) parts = parts[0].split("");
+  const out = [];
+  parts.forEach(p => {
+    const m = p.match(/[A-D]/);
+    if (m && !out.includes(m[0])) out.push(m[0]);
+  });
+  return out;
+}
+function normalizeMcAnswerKey(ans) {
+  return parseMcAnswerKey(ans).join(",");
+}
 function quizQuestionScore(q, raw) {
   if (raw === undefined || raw === null || String(raw).trim() === "") return null;
   if (q.type === "MC") {
     if (!q.ans) return 0;
-    const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
-    return corrects.includes(String(raw).trim().toUpperCase()) ? (q.max || 1) : 0;
+    const corrects = parseMcAnswerKey(q.ans);
+    if (!corrects.length) return 0;
+    const student = String(raw).trim().toUpperCase().replace(/[^A-D]/g, "");
+    if (student.length === 1) return corrects.includes(student) ? (q.max || 1) : 0;
+    if (student.length > 1) return student.split("").some(ch => corrects.includes(ch)) ? (q.max || 1) : 0;
+    return 0;
   }
   const n = parseFloat(raw);
   return isNaN(n) ? 0 : n;
@@ -5591,7 +5612,7 @@ function ExamSettingsView({ students, examMaps, setExamMaps, currentCohort }) {
       level: q.level,
       topicId: q.topicId,
       topicDesc: q.topicDesc,
-      ans: q.ans || ""
+      ans: q.type === "MC" ? normalizeMcAnswerKey(q.ans || "") : (q.ans || "")
     }));
     let cohortVal = assignCohort;
     if (cohortVal === "所有學生") cohortVal = "";
@@ -5664,8 +5685,9 @@ ${syllabus}
 1. 題號：MC1、MC2…／LQ1a、LQ1bi…
 2. 題型：MC 或 LQ；難度：淺／中／深
 3. topicId 必須用上方大綱編號；topicDesc 20–30 字
-4. MC 答案 A/B/C/D；LQ 答案留空
-5. 只輸出資料行（可含表頭），不要 Markdown`;
+4. MC 答案：單一如 A；多個正解用 B,D 或 B/D 或 BD（學生選其中任一個皆得分）
+5. LQ 答案留空
+6. 只輸出資料行（可含表頭），不要 Markdown`;
   };
 
   return (
@@ -5716,8 +5738,9 @@ ${syllabus}
             <div className="text-sm text-slate-500 flex items-end pb-2">新建建議選「{selectedCohort || "—"}」</div>
           </div>
           <label className="text-sm font-bold text-slate-600 block">題目（Tab：題號 題型 滿分 難度 topicId 描述 [答案]）
+            <span className="block text-xs font-normal text-violet-700 mt-0.5 mb-1">MC 可多個正解：例如 <b>B,D</b> 或 <b>B/D</b> 或 <b>BD</b>（學生選 B 或 D 皆得滿分）</span>
             <textarea className="mt-1 w-full border-2 rounded-xl p-3 text-sm mono h-52" value={pasteData} onChange={e=>setPasteData(e.target.value)}
-              placeholder={"MC1\tMC\t1\t中\t2.6.1\t計算功\tA\nLQ1a\tLQ\t2\t淺\t2.6.2\t計算勢能\t"} />
+              placeholder={"MC1\tMC\t1\t中\t2.6.1\t計算功\tA\nMC2\tMC\t1\t中\t2.6.2\t多正解例\tB,D\nLQ1a\tLQ\t2\t淺\t2.6.2\t計算勢能\t"} />
           </label>
           <div className="flex flex-wrap gap-2">
             <button disabled={busy} className="bg-purple-600 text-white font-bold px-5 py-2.5 rounded-xl text-sm disabled:opacity-50" onClick={handleSave}>
