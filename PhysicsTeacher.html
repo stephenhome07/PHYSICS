@@ -4828,6 +4828,10 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   const [mkLq, setMkLq] = useState(0);
   const [mkLevel, setMkLevel] = useState("淺");
   const [promptTopicIds, setPromptTopicIds] = useState([]);
+  const makeupRef = useRef({});
+  const saveSeqRef = useRef(0);
+
+  useEffect(() => { makeupRef.current = makeup; }, [makeup]);
 
   useEffect(() => {
     if (examIds.length && !examIds.includes(selectedExam)) setSelectedExam(examIds[0] || "");
@@ -4855,7 +4859,29 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
           });
           return next;
         });
-        setMakeup(mk || {});
+        // 正規化 topics：保留 done / 手動加入
+        const normalized = {};
+        Object.keys(mk || {}).forEach(sid => {
+          const entry = mk[sid] || {};
+          const topics = {};
+          Object.entries(entry.topics || {}).forEach(([tid, tp]) => {
+            topics[tid] = {
+              done: !!(tp && tp.done),
+              label: (tp && tp.label) || tid,
+              pct: tp && tp.pct != null ? tp.pct : null,
+              qs: (tp && tp.qs) || []
+            };
+          });
+          const ids = Object.keys(topics);
+          const allDone = ids.length > 0 && ids.every(id => topics[id].done);
+          normalized[sid] = {
+            ...entry,
+            topics,
+            status: allDone ? "DONE" : (entry.status || "PENDING")
+          };
+        });
+        makeupRef.current = normalized;
+        setMakeup(normalized);
         setFocus("");
       } catch (e) { console.warn(e); }
       if (!cancelled) setLoading(false);
@@ -4897,12 +4923,30 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   };
 
   const persist = async (nextMap) => {
+    // 同步更新 ref，避免連點／onBlur 用到舊 makeup 蓋掉勾選與「標完成」
+    makeupRef.current = nextMap;
+    setMakeup(nextMap);
+    const seq = ++saveSeqRef.current;
     setSaving(true);
     try {
       await saveExamMakeup(selectedExam, nextMap);
-      setMakeup(nextMap);
     } catch (e) { alert(e.message); }
-    setSaving(false);
+    if (seq === saveSeqRef.current) setSaving(false);
+  };
+
+  /** 以最新 makeupRef 為準 patch 單一學生，避免 stale state */
+  const patchStudent = (sid, patchOrFn) => {
+    const prev = makeupRef.current || {};
+    const cur = prev[sid] || {};
+    const patch = typeof patchOrFn === "function" ? patchOrFn(cur) : patchOrFn;
+    let entry = { ...cur, ...patch, updatedAt: new Date().toISOString() };
+    if (patch.topics) {
+      const ids = Object.keys(patch.topics);
+      entry.status = ids.length > 0 && ids.every(id => patch.topics[id]?.done) ? "DONE" : "PENDING";
+    }
+    const next = { ...prev, [sid]: entry };
+    persist(next);
+    return next;
   };
 
   const buildWeakTopicsForStudent = (sid) => {
@@ -4954,7 +4998,7 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   };
 
   const addStudent = (sid, category) => {
-    if (!sid || makeup[sid]) return;
+    if (!sid || (makeupRef.current || {})[sid]) return;
     const st = calcStudent(sid);
     const entry = {
       category: category || (!st ? "ABSENT" : (st.weighted < 50 ? "FAIL" : "LOW")),
@@ -4964,13 +5008,12 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
       status: "PENDING",
       updatedAt: new Date().toISOString()
     };
-    const next = { ...makeup, [sid]: entry };
-    persist(next);
+    persist({ ...(makeupRef.current || {}), [sid]: entry });
     setFocus(sid);
   };
 
   const addSuggested = () => {
-    const next = { ...makeup };
+    const next = { ...(makeupRef.current || {}) };
     activeStudents.forEach(s => {
       const st = calcStudent(s.id);
       if (!st || st.weighted < 50) {
@@ -4991,7 +5034,7 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
 
   const removeStudent = (sid) => {
     if (!confirm("從補考名單移除？進度會刪除。")) return;
-    const next = { ...makeup };
+    const next = { ...(makeupRef.current || {}) };
     delete next[sid];
     persist(next);
     if (focus === sid) setFocus("");
@@ -5173,20 +5216,28 @@ ${syllabus}
                   <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
                     value={focusM.sessionNote || ""}
                     onChange={e => {
-                      const next = { ...makeup, [focus]: { ...focusM, sessionNote: e.target.value, updatedAt: new Date().toISOString() } };
+                      const val = e.target.value;
+                      const prev = makeupRef.current || {};
+                      const cur = prev[focus] || focusM;
+                      const next = { ...prev, [focus]: { ...cur, sessionNote: val, updatedAt: new Date().toISOString() } };
+                      makeupRef.current = next;
                       setMakeup(next);
                     }}
-                    onBlur={() => persist(makeup)}
+                    onBlur={e => patchStudent(focus, { sessionNote: e.target.value })}
                     placeholder="今日約 Lunch；上次做到 2.3.3" />
                 </label>
                 <label className="text-xs font-bold">其他備註
                   <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
                     value={focusM.remark || ""}
                     onChange={e => {
-                      const next = { ...makeup, [focus]: { ...focusM, remark: e.target.value } };
+                      const val = e.target.value;
+                      const prev = makeupRef.current || {};
+                      const cur = prev[focus] || focusM;
+                      const next = { ...prev, [focus]: { ...cur, remark: val, updatedAt: new Date().toISOString() } };
+                      makeupRef.current = next;
                       setMakeup(next);
                     }}
-                    onBlur={() => persist(makeup)} />
+                    onBlur={e => patchStudent(focus, { remark: e.target.value })} />
                 </label>
               </div>
 
@@ -5198,45 +5249,31 @@ ${syllabus}
                   const weak = pool.filter(x => x.weak);
                   const strong = pool.filter(x => !x.weak);
                   const toggleInclude = (item) => {
-                    const nextTopics = { ...focusTopics };
-                    if (nextTopics[item.tid]) {
-                      delete nextTopics[item.tid];
-                    } else {
-                      nextTopics[item.tid] = {
-                        done: false,
-                        label: item.label,
-                        pct: item.pct,
-                        qs: item.qs
-                      };
-                    }
-                    const ids = Object.keys(nextTopics);
-                    const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
-                    persist({
-                      ...makeup,
-                      [focus]: {
-                        ...focusM,
-                        topics: nextTopics,
-                        status: allDone ? "DONE" : "PENDING",
-                        updatedAt: new Date().toISOString()
+                    patchStudent(focus, (cur) => {
+                      const nextTopics = { ...(cur.topics || {}) };
+                      if (nextTopics[item.tid]) {
+                        delete nextTopics[item.tid];
+                      } else {
+                        nextTopics[item.tid] = {
+                          done: false,
+                          label: item.label,
+                          pct: item.pct,
+                          qs: item.qs
+                        };
                       }
+                      return { topics: nextTopics };
                     });
                   };
                   const markDone = (tid) => {
-                    if (!focusTopics[tid]) return;
-                    const nextTopics = {
-                      ...focusTopics,
-                      [tid]: { ...focusTopics[tid], done: !focusTopics[tid].done }
-                    };
-                    const ids = Object.keys(nextTopics);
-                    const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
-                    persist({
-                      ...makeup,
-                      [focus]: {
-                        ...focusM,
-                        topics: nextTopics,
-                        status: allDone ? "DONE" : "PENDING",
-                        updatedAt: new Date().toISOString()
-                      }
+                    patchStudent(focus, (cur) => {
+                      const topics = cur.topics || {};
+                      if (!topics[tid]) return {};
+                      return {
+                        topics: {
+                          ...topics,
+                          [tid]: { ...topics[tid], done: !topics[tid].done }
+                        }
+                      };
                     });
                   };
                   const row = (item, zone) => {
