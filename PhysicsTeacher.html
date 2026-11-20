@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Physics Teacher · Firebase</title>
+<title>Physics Teacher V5.01</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
@@ -4865,9 +4865,11 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
           const entry = mk[sid] || {};
           const topics = {};
           Object.entries(entry.topics || {}).forEach(([tid, tp]) => {
-            topics[tid] = {
+            const k = String(tid || "").trim();
+            if (!k) return;
+            topics[k] = {
               done: !!(tp && tp.done),
-              label: (tp && tp.label) || tid,
+              label: (tp && tp.label) || k,
               pct: tp && tp.pct != null ? tp.pct : null,
               qs: (tp && tp.qs) || []
             };
@@ -4968,7 +4970,8 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
     Object.entries(topicBag).forEach(([tid, v]) => {
       const pct = v.max > 0 ? (v.score / v.max) * 100 : 0;
       if (pct < 60) {
-        topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct), qs: v.qs };
+        const k = String(tid || "").trim();
+        topics[k] = { done: false, label: v.desc || k, pct: Math.round(pct), qs: v.qs };
       }
     });
     return topics;
@@ -5248,13 +5251,30 @@ ${syllabus}
                   const pool = examTopicPoolForStudent(focus);
                   const weak = pool.filter(x => x.weak);
                   const strong = pool.filter(x => !x.weak);
-                  const toggleInclude = (item) => {
+                  const topicKey = (tid) => String(tid || "").trim();
+                  const hasTopic = (topics, tid) => {
+                    const k = topicKey(tid);
+                    if (!topics) return false;
+                    if (topics[k]) return true;
+                    return Object.keys(topics).some(x => topicKey(x) === k);
+                  };
+                  const purgeTopic = (topics, tid) => {
+                    const k = topicKey(tid);
+                    const next = { ...topics };
+                    Object.keys(next).forEach(x => { if (topicKey(x) === k) delete next[x]; });
+                    return next;
+                  };
+                  const toggleInclude = (item, wantOn) => {
+                    const tid = topicKey(item.tid);
                     patchStudent(focus, (cur) => {
-                      const nextTopics = { ...(cur.topics || {}) };
-                      if (nextTopics[item.tid]) {
-                        delete nextTopics[item.tid];
-                      } else {
-                        nextTopics[item.tid] = {
+                      let nextTopics = { ...(cur.topics || {}) };
+                      const currentlyOn = hasTopic(nextTopics, tid);
+                      // 以 checkbox 目標狀態為準，避免「取消」時因 key 不一致反而再加入
+                      if (wantOn === false || (wantOn == null && currentlyOn)) {
+                        nextTopics = purgeTopic(nextTopics, tid);
+                      } else if (wantOn === true || (wantOn == null && !currentlyOn)) {
+                        nextTopics = purgeTopic(nextTopics, tid);
+                        nextTopics[tid] = {
                           done: false,
                           label: item.label,
                           pct: item.pct,
@@ -5265,24 +5285,32 @@ ${syllabus}
                     });
                   };
                   const markDone = (tid) => {
+                    const k = topicKey(tid);
                     patchStudent(focus, (cur) => {
-                      const topics = cur.topics || {};
-                      if (!topics[tid]) return {};
+                      const topics = { ...(cur.topics || {}) };
+                      // 找到實際 key
+                      let real = topics[k] ? k : Object.keys(topics).find(x => topicKey(x) === k);
+                      if (!real || !topics[real]) return {};
                       return {
                         topics: {
                           ...topics,
-                          [tid]: { ...topics[tid], done: !topics[tid].done }
+                          [real]: { ...topics[real], done: !topics[real].done }
                         }
                       };
                     });
                   };
                   const row = (item, zone) => {
-                    const included = !!focusTopics[item.tid];
-                    const done = included && focusTopics[item.tid]?.done;
+                    const included = hasTopic(focusTopics, item.tid);
+                    const done = included && (() => {
+                      const k = topicKey(item.tid);
+                      const tp = focusTopics[k] || Object.entries(focusTopics).find(([x]) => topicKey(x) === k)?.[1];
+                      return !!(tp && tp.done);
+                    })();
                     return (
-                      <div key={item.tid} className={`flex items-center gap-2 border rounded-xl p-2 ${done?"bg-emerald-50 border-emerald-200":included?"bg-white border-purple-200":"bg-slate-50 border-slate-100"}`}>
+                      <div key={topicKey(item.tid)} className={`flex items-center gap-2 border rounded-xl p-2 ${done?"bg-emerald-50 border-emerald-200":included?"bg-white border-purple-200":"bg-slate-50 border-slate-100"}`}>
                         <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
-                          <input type="checkbox" checked={included} onChange={() => toggleInclude(item)} />
+                          <input type="checkbox" checked={included}
+                            onChange={e => toggleInclude(item, e.target.checked)} />
                           <div className="min-w-0">
                             <div className="text-sm font-bold">
                               <span className="mono text-purple-700">{item.tid}</span>{" "}
