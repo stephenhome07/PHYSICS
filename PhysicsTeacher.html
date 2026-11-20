@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Physics Teacher V5.01</title>
+<title>Physics Teacher V5.02</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
@@ -535,10 +535,11 @@ async function loadExamMakeup(examId) {
 }
 
 async function saveExamMakeup(examId, studentsMap) {
+  // 不用 merge 深層合併 students，整份覆蓋，確保取消勾選真的寫入
   await db.collection("examMakeup").doc(String(examId)).set({
-    students: studentsMap,
+    students: studentsMap || {},
     updatedAt: new Date().toISOString()
-  }, { merge: true });
+  });
 }
 
 async function loadPastpaperMaps() {
@@ -4867,11 +4868,16 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
           Object.entries(entry.topics || {}).forEach(([tid, tp]) => {
             const k = String(tid || "").trim();
             if (!k) return;
+            const pct = tp && tp.pct != null ? Number(tp.pct) : null;
+            const isStrong = pct != null && pct >= 60;
+            // ≥60% 只有明確 manual 才保留；舊資料一次全選的會自動清掉
+            if (isStrong && !(tp && tp.manual)) return;
             topics[k] = {
               done: !!(tp && tp.done),
               label: (tp && tp.label) || k,
-              pct: tp && tp.pct != null ? tp.pct : null,
-              qs: (tp && tp.qs) || []
+              pct,
+              qs: (tp && tp.qs) || [],
+              manual: !!(tp && tp.manual) || isStrong
             };
           });
           const ids = Object.keys(topics);
@@ -4885,6 +4891,14 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
         makeupRef.current = normalized;
         setMakeup(normalized);
         setFocus("");
+        // 若清掉了舊的 ≥60% 無 manual 資料，寫回雲端，避免下次又載入舊勾選
+        try {
+          const rawCount = Object.keys(mk || {}).reduce((n, sid) => n + Object.keys((mk[sid] || {}).topics || {}).length, 0);
+          const newCount = Object.keys(normalized).reduce((n, sid) => n + Object.keys((normalized[sid] || {}).topics || {}).length, 0);
+          if (newCount < rawCount) {
+            await saveExamMakeup(selectedExam, normalized);
+          }
+        } catch (e) { console.warn("cleanup makeup save", e); }
       } catch (e) { console.warn(e); }
       if (!cancelled) setLoading(false);
     })();
@@ -5211,7 +5225,22 @@ ${syllabus}
                     {focusComplete && <span className="ml-2 text-emerald-600 font-bold">✓ 全部課題已完成</span>}
                   </div>
                 </div>
-                <button className="text-rose-600 text-xs font-bold" onClick={() => removeStudent(focus)}>移出名單</button>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="text-amber-700 text-xs font-bold border border-amber-300 bg-amber-50 px-2 py-1 rounded-lg"
+                    onClick={() => {
+                      if (!confirm("清除此生所有 ≥60% 課題（保留 <60% 弱項）？")) return;
+                      patchStudent(focus, (cur) => {
+                        const nextTopics = {};
+                        Object.entries(cur.topics || {}).forEach(([tid, tp]) => {
+                          const pct = tp && tp.pct != null ? Number(tp.pct) : null;
+                          if (pct != null && pct >= 60) return;
+                          nextTopics[tid] = tp;
+                        });
+                        return { topics: nextTopics };
+                      });
+                    }}>清除 ≥60% 勾選</button>
+                  <button className="text-rose-600 text-xs font-bold" onClick={() => removeStudent(focus)}>移出名單</button>
+                </div>
               </div>
 
               <div className="grid sm:grid-cols-2 gap-2">
@@ -5246,7 +5275,7 @@ ${syllabus}
 
               <div>
                 <div className="font-bold text-sm text-slate-700 mb-1">本卷學習點（納入補底名單）</div>
-                <p className="text-[11px] text-slate-500 mb-2">&lt;60% 預設已勾；≥60% 可自行勾選加入。右側剔「今日已完成」。</p>
+                <p className="text-[11px] text-slate-500 mb-2">&lt;60% 預設納入；<b className="text-emerald-700">≥60% 預設不勾</b>，只在你手動勾選後才會保留。右側剔「今日已完成」。</p>
                 {(() => {
                   const pool = examTopicPoolForStudent(focus);
                   const weak = pool.filter(x => x.weak);
@@ -5274,11 +5303,14 @@ ${syllabus}
                         nextTopics = purgeTopic(nextTopics, tid);
                       } else if (wantOn === true || (wantOn == null && !currentlyOn)) {
                         nextTopics = purgeTopic(nextTopics, tid);
+                        const pct = item.pct != null ? Number(item.pct) : null;
                         nextTopics[tid] = {
                           done: false,
                           label: item.label,
-                          pct: item.pct,
-                          qs: item.qs
+                          pct,
+                          qs: item.qs,
+                          // ≥60% 必須標 manual，否則下次載入不會勾
+                          manual: pct == null ? false : pct >= 60
                         };
                       }
                       return { topics: nextTopics };
